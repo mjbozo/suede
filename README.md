@@ -11,7 +11,7 @@ See examples for current capabilities.
 ```go
 import (
 	"fmt"
-	"github.com/embarkerr/suede"
+	"github.com/mjbozo/suede"
 )
 
 func main() {
