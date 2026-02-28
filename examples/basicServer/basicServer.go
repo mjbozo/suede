@@ -5,7 +5,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/embarkerr/suede"
+	"github.com/mjbozo/suede"
 )
 
 func main() {

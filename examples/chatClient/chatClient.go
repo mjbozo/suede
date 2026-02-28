@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/embarkerr/suede"
+	"github.com/mjbozo/suede"
 )
 
 func main() {

@@ -26,7 +26,7 @@ type wsclient struct {
 	OnConnect    func()
 	OnDisconnect func()
 	OnMessage    func([]byte)
-	connection   *net.Conn
+	connection   net.Conn
 }
 
 func WebSocket(rawURL string) (*wsclient, error) {
@@ -108,7 +108,7 @@ func (wsClient *wsclient) handleConnection() error {
 		return connErr
 	}
 
-	wsClient.connection = &conn
+	wsClient.connection = conn
 
 	wsKey := GenerateWSKey()
 	wsAccept := GenerateWSAccept(wsKey)
@@ -166,7 +166,7 @@ func (wsClient *wsclient) handleConnection() error {
 
 func (wsClient *wsclient) readFromConnection(wg *sync.WaitGroup) {
 	defer wg.Done()
-	defer (*wsClient.connection).Close()
+	defer wsClient.connection.Close()
 
 	if wsClient.OnDisconnect != nil {
 		defer wsClient.OnDisconnect()
@@ -176,7 +176,7 @@ func (wsClient *wsclient) readFromConnection(wg *sync.WaitGroup) {
 
 ReadForever:
 	for true {
-		bytesRead, readErr := (*wsClient.connection).Read(readBuffer)
+		bytesRead, readErr := wsClient.connection.Read(readBuffer)
 		if readErr != nil {
 			fmt.Printf("Read Error: %s\n", readErr.Error())
 			break ReadForever
@@ -255,7 +255,7 @@ func (wsClient *wsclient) readFrameData(readBuffer []byte, length uint64) []byte
 
 	bytesRemaining := length - uint64(len(data))
 	frameBuffer := make([]byte, bytesRemaining)
-	bytesRead, err := (*wsClient.connection).Read(frameBuffer)
+	bytesRead, err := wsClient.connection.Read(frameBuffer)
 	if err != nil {
 		fmt.Println("Continutation read err")
 		fmt.Println(err.Error())
@@ -318,17 +318,17 @@ func (wsClient *wsclient) send(data []byte, isBinary bool) {
 	frame = append(frame, mask...)
 	frame = append(frame, maskedData...)
 
-	n, err := (*wsClient.connection).Write(frame)
+	n, err := wsClient.connection.Write(frame)
 	if n != len(frame) || err != nil {
 		fmt.Printf("Send error: %s, wrote %d/%d bytes\n", err.Error(), n, len(frame))
 	}
 }
 
 func (wsClient *wsclient) Ping() {
-	(*wsClient.connection).Write([]byte{0x89, 0x80})
+	wsClient.connection.Write([]byte{0x89, 0x80})
 }
 
-func (wsClient *wsclient) pong(connection *net.Conn) {
+func (wsClient *wsclient) pong(connection net.Conn) {
 	pongPayload := []byte{0x8A, 0x00}
-	(*connection).Write(pongPayload)
+	connection.Write(pongPayload)
 }

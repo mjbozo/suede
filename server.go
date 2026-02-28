@@ -24,7 +24,7 @@ type wsserver struct {
 	OnDisconnect func()
 	OnMessage    func(net.Conn, []byte)
 	active       bool
-	clients      []*net.Conn
+	clients      []net.Conn
 }
 
 func WebSocketServer(port uint16, path string) (*wsserver, error) {
@@ -79,7 +79,7 @@ func (wsServer *wsserver) IsActive() bool {
 	return wsServer.active
 }
 
-func (wsServer *wsserver) Clients() []*net.Conn {
+func (wsServer *wsserver) Clients() []net.Conn {
 	return wsServer.clients
 }
 
@@ -91,7 +91,7 @@ func (wsServer *wsserver) runServer(res http.ResponseWriter, req *http.Request) 
 
 	wsServer.readFromConnection(connection)
 
-	closeErr := (*connection).Close()
+	closeErr := connection.Close()
 	if closeErr != nil {
 		panic("Failed to close connection")
 	}
@@ -109,7 +109,7 @@ func (wsServer *wsserver) runServer(res http.ResponseWriter, req *http.Request) 
 	}
 }
 
-func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Request) (*net.Conn, error) {
+func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Request) (net.Conn, error) {
 	if req.Header.Get("Upgrade") != "websocket" {
 		return nil, &WSServerError{message: "Request header not requesting websocket upgrade"}
 	}
@@ -123,7 +123,7 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 	}
 
 	connection, _, _ := hijacker.Hijack()
-	wsServer.clients = append(wsServer.clients, &connection)
+	wsServer.clients = append(wsServer.clients, connection)
 
 	var content []byte
 	content = append(content, "HTTP/1.1 101 Switching Protocols\r\n"...)
@@ -137,15 +137,15 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 		wsServer.OnConnect(connection)
 	}
 
-	return &connection, nil
+	return connection, nil
 }
 
-func (wsServer *wsserver) readFromConnection(connection *net.Conn) {
+func (wsServer *wsserver) readFromConnection(connection net.Conn) {
 	readBuffer := make([]byte, 256)
 
 ReadForever:
 	for true {
-		bytesRead, readErr := (*connection).Read(readBuffer)
+		bytesRead, readErr := connection.Read(readBuffer)
 		if readErr != nil {
 			if readErr == io.EOF {
 				fmt.Println("Client disconnected")
@@ -213,12 +213,12 @@ ReadForever:
 		}
 
 		if wsServer.OnMessage != nil {
-			wsServer.OnMessage(*connection, data)
+			wsServer.OnMessage(connection, data)
 		}
 	}
 }
 
-func (wsServer *wsserver) readFrameData(connection *net.Conn, mask []byte, readBuffer []byte, length uint64) []byte {
+func (wsServer *wsserver) readFrameData(connection net.Conn, mask []byte, readBuffer []byte, length uint64) []byte {
 	data := make([]byte, 0, length)
 	for i := 0; i < len(readBuffer); i++ {
 		data = append(data, readBuffer[i]^mask[i%4])
@@ -234,7 +234,7 @@ func (wsServer *wsserver) readFrameData(connection *net.Conn, mask []byte, readB
 
 	bytesRemaining := length - bytesWritten
 	frameBuffer := make([]byte, bytesRemaining)
-	bytesRead, err := (*connection).Read(frameBuffer)
+	bytesRead, err := connection.Read(frameBuffer)
 	if err != nil {
 		fmt.Println("Continutation read err")
 		fmt.Println(err.Error())
@@ -249,15 +249,15 @@ func (wsServer *wsserver) readFrameData(connection *net.Conn, mask []byte, readB
 	return data
 }
 
-func (wsServer *wsserver) SendText(connection *net.Conn, data []byte) {
+func (wsServer *wsserver) SendText(connection net.Conn, data []byte) {
 	wsServer.send(connection, data, false)
 }
 
-func (wsServer *wsserver) SendBinary(connection *net.Conn, data []byte) {
+func (wsServer *wsserver) SendBinary(connection net.Conn, data []byte) {
 	wsServer.send(connection, data, true)
 }
 
-func (wsServer *wsserver) send(connection *net.Conn, data []byte, isBinary bool) {
+func (wsServer *wsserver) send(connection net.Conn, data []byte, isBinary bool) {
 	payloadLength := len(data)
 	frameLength := payloadLength + 2
 
@@ -288,7 +288,7 @@ func (wsServer *wsserver) send(connection *net.Conn, data []byte, isBinary bool)
 	}
 
 	responsePayload = append(responsePayload, data...)
-	n, err := (*connection).Write(responsePayload)
+	n, err := connection.Write(responsePayload)
 	if n != len(responsePayload) || err != nil {
 		fmt.Println(err)
 	}
@@ -314,10 +314,10 @@ func (wsServer *wsserver) Close() {
 
 func (wsServer *wsserver) Ping() {
 	for _, client := range wsServer.clients {
-		(*client).Write([]byte{0x89, 0x00})
+		client.Write([]byte{0x89, 0x00})
 	}
 }
 
-func (wsServer *wsserver) pong(connection *net.Conn) {
-	(*connection).Write([]byte{0x8A, 0x00})
+func (wsServer *wsserver) pong(connection net.Conn) {
+	connection.Write([]byte{0x8A, 0x00})
 }

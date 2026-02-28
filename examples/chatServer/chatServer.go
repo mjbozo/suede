@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/embarkerr/suede"
+	"github.com/mjbozo/suede"
 )
 
 func main() {
