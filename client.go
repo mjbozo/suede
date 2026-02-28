@@ -36,6 +36,10 @@ func WebSocket(rawURL string) (*wsclient, error) {
 		return nil, urlErr
 	}
 
+	if urlObject.Path == "" {
+		urlObject.Path = "/"
+	}
+
 	wsClient := &wsclient{
 		host: urlObject.Host,
 		path: urlObject.Path,
