@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/embarkerr/suede"
 )
@@ -12,16 +13,16 @@ func main() {
 		panic("could not start server")
 	}
 
-	server.OnConnect = func() {
-		server.Broadcast([]byte("New user joined the chat!"))
+	server.OnConnect = func(client net.Conn) {
+		server.BroadcastText([]byte("New user joined the chat!"))
 	}
 
 	server.OnDisconnect = func() {
-		server.Broadcast([]byte("User has left the chat"))
+		server.BroadcastText([]byte("User has left the chat"))
 	}
 
-	server.OnMessage = func(data []byte) {
-		server.Broadcast(data)
+	server.OnMessage = func(client net.Conn, data []byte) {
+		server.BroadcastText(data)
 	}
 
 	fmt.Println("Server starting")

@@ -18,10 +18,10 @@ func main() {
 	fmt.Print("Enter your name > ")
 	reader := bufio.NewReader(os.Stdin)
 	name, _ := reader.ReadString('\n')
-	name = strings.Replace(name, "\n", "", -1)
+	name = strings.ReplaceAll(name, "\n", "")
 
 	client.OnConnect = func() {
-		client.Send([]byte(name + " has joined the chat"))
+		client.SendText([]byte(name + " has joined the chat"))
 	}
 
 	client.OnMessage = func(data []byte) {
@@ -39,8 +39,8 @@ func main() {
 			}
 
 			fmt.Print("\u001b[1A\u001b[2K")
-			message = strings.Replace(message, "\n", "", -1)
-			client.Send([]byte("[" + name + "] " + message))
+			message = strings.ReplaceAll(message, "\n", "")
+			client.SendText([]byte("[" + name + "] " + message))
 		}
 	})
 }

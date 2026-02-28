@@ -20,9 +20,9 @@ func (err *WSServerError) Error() string {
 type wsserver struct {
 	Host         uint16
 	Path         string
-	OnConnect    func()
+	OnConnect    func(net.Conn)
 	OnDisconnect func()
-	OnMessage    func([]byte)
+	OnMessage    func(net.Conn, []byte)
 	active       bool
 	clients      []*net.Conn
 }
@@ -134,7 +134,7 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 	connection.Write(content)
 
 	if wsServer.OnConnect != nil {
-		wsServer.OnConnect()
+		wsServer.OnConnect(connection)
 	}
 
 	return &connection, nil
@@ -213,7 +213,7 @@ ReadForever:
 		}
 
 		if wsServer.OnMessage != nil {
-			wsServer.OnMessage(data)
+			wsServer.OnMessage(*connection, data)
 		}
 	}
 }
@@ -249,21 +249,62 @@ func (wsServer *wsserver) readFrameData(connection *net.Conn, mask []byte, readB
 	return data
 }
 
-func (wsServer *wsserver) Send(connection *net.Conn, data []byte) {
-	payloadLength := len(data)
-	frameLength := payloadLength + 2
-	responsePayload := make([]byte, 0, frameLength)
-
-	// TODO: Handle frames when data length > 125
-	responsePayload = append(responsePayload, 0x81)
-	responsePayload = append(responsePayload, byte(payloadLength))
-	responsePayload = append(responsePayload, data...)
-	(*connection).Write(responsePayload)
+func (wsServer *wsserver) SendText(connection *net.Conn, data []byte) {
+	wsServer.send(connection, data, false)
 }
 
-func (wsServer *wsserver) Broadcast(data []byte) {
+func (wsServer *wsserver) SendBinary(connection *net.Conn, data []byte) {
+	wsServer.send(connection, data, true)
+}
+
+func (wsServer *wsserver) send(connection *net.Conn, data []byte, isBinary bool) {
+	payloadLength := len(data)
+	frameLength := payloadLength + 2
+
+	if payloadLength > 125 {
+		frameLength += 2
+	}
+
+	if payloadLength > (1 << 16) {
+		frameLength += 2
+	}
+
+	responsePayload := make([]byte, 0, frameLength)
+
+	controlByte := 0x81
+	if isBinary {
+		controlByte += 0x01
+	}
+	responsePayload = append(responsePayload, byte(controlByte))
+
+	if payloadLength <= 125 {
+		responsePayload = append(responsePayload, byte(payloadLength))
+	} else if payloadLength <= (1 << 16) {
+		responsePayload = append(responsePayload, 0x7E)
+		responsePayload = binary.BigEndian.AppendUint16(responsePayload, uint16(payloadLength))
+	} else if payloadLength > (1 << 16) {
+		responsePayload = append(responsePayload, 0x7F)
+		responsePayload = binary.BigEndian.AppendUint64(responsePayload, uint64(payloadLength))
+	}
+
+	responsePayload = append(responsePayload, data...)
+	n, err := (*connection).Write(responsePayload)
+	if n != len(responsePayload) || err != nil {
+		fmt.Println(err)
+	}
+}
+
+func (wsServer *wsserver) BroadcastText(data []byte) {
+	wsServer.broadcast(data, false)
+}
+
+func (wsServer *wsserver) BroadcastBinary(data []byte) {
+	wsServer.broadcast(data, true)
+}
+
+func (wsServer *wsserver) broadcast(data []byte, isBinary bool) {
 	for _, client := range wsServer.clients {
-		wsServer.Send(client, data)
+		wsServer.send(client, data, isBinary)
 	}
 }
 

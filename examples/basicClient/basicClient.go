@@ -15,8 +15,8 @@ func main() {
 	}
 
 	wsClient.OnConnect = func() {
-		fmt.Println("Kanso WebSocket client connected")
-		wsClient.Send([]byte("Hello I am a new client"))
+		fmt.Println("Suede WebSocket client connected")
+		wsClient.SendText([]byte("Hello I am a new client"))
 	}
 
 	wsClient.OnDisconnect = func() {
@@ -33,7 +33,7 @@ func main() {
 
 	// RunCallback - same as run, but executes a callback while the client is connected
 	wsClient.RunCallback(func() {
-		fmt.Println("Kanso WebSocket client connected")
+		fmt.Println("Suede WebSocket client connected")
 		fmt.Printf("Connected to %s\n", "/chat")
 	})
 
@@ -47,8 +47,8 @@ func main() {
 
 	// add any additional logic here (before the wg.Wait() call), which will be executed as normal
 	// for example:
-	fmt.Println("Kanso WebSocket client connected")
-	wsClient.Send([]byte("Hello from Kanso WebSocket client!"))
+	fmt.Println("Suede WebSocket client connected")
+	wsClient.SendText([]byte("Hello from Suede WebSocket client!"))
 
 	wg.Wait()
 	// End of 'Connect' example

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"sync"
 
 	"github.com/embarkerr/suede"
@@ -13,7 +14,7 @@ func main() {
 		panic("Could not create WebSocket server")
 	}
 
-	wsServer.OnConnect = func() {
+	wsServer.OnConnect = func(client net.Conn) {
 		fmt.Println("Client connected")
 	}
 
@@ -21,9 +22,9 @@ func main() {
 		fmt.Println("Client disconnected")
 	}
 
-	wsServer.OnMessage = func(data []byte) {
+	wsServer.OnMessage = func(client net.Conn, data []byte) {
 		fmt.Printf("Message = %s\n", data)
-		wsServer.Broadcast([]byte("broadcasting..."))
+		wsServer.BroadcastText([]byte("broadcasting..."))
 	}
 
 	// Once created, the server can be started in 3 different ways:
@@ -32,7 +33,7 @@ func main() {
 
 	// RunCallback - same as run, but executes a callback while the server is active
 	wsServer.RunCallback(func() {
-		fmt.Println("Kanso WebSocket server running")
+		fmt.Println("Suede WebSocket server running")
 		fmt.Printf("Port: %s\tPath: %s\n", fmt.Sprintf("%d", wsServer.Host), wsServer.Path)
 		// add any additional logic here
 	})
@@ -44,7 +45,7 @@ func main() {
 
 	// add any additional logic here, which will be executed as normal program
 	// for example:
-	fmt.Println("Kanso WebSocket server running")
+	fmt.Println("Suede WebSocket server running")
 	fmt.Printf("Port: %s\tPath: %s\n", fmt.Sprintf("%d", wsServer.Host), wsServer.Path)
 
 	wg.Wait()

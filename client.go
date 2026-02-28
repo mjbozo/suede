@@ -2,10 +2,10 @@ package suede
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/url"
 	"strings"
@@ -268,8 +268,16 @@ func (wsClient *wsclient) readFrameData(readBuffer []byte, length uint64) []byte
 	return data
 }
 
+func (wsClient *wsclient) SendText(data []byte) {
+	wsClient.send(data, false)
+}
+
+func (wsClient *wsclient) SendBinary(data []byte) {
+	wsClient.send(data, true)
+}
+
 // Sends bytes to connected WebSocket server
-func (wsClient *wsclient) Send(data []byte) {
+func (wsClient *wsclient) send(data []byte, isBinary bool) {
 	mask := make([]byte, 4)
 	rand.Read(mask)
 
@@ -279,18 +287,40 @@ func (wsClient *wsclient) Send(data []byte) {
 		maskedData = append(maskedData, maskedByte)
 	}
 
-	frameLength := len(maskedData) + 2
-	// TODO: Handle frames when data length > 125
+	payloadLength := len(maskedData)
+	frameLength := payloadLength + 2
+
+	if payloadLength > 125 {
+		frameLength += 2
+	}
+
+	if payloadLength > (1 << 16) {
+		frameLength += 2
+	}
 
 	frame := make([]byte, 0, frameLength)
-	frame = append(frame, 0x81)
-	frame = append(frame, 0b10000000|byte(len(maskedData)))
+	controlByte := 0x81
+	if isBinary {
+		controlByte += 0x01
+	}
+	frame = append(frame, byte(controlByte))
+
+	if payloadLength <= 125 {
+		frame = append(frame, 0b10000000|byte(len(maskedData)))
+	} else if payloadLength <= (1 << 16) {
+		frame = append(frame, 0xFE)
+		frame = binary.BigEndian.AppendUint16(frame, uint16(payloadLength))
+	} else if payloadLength > (1 << 16) {
+		frame = append(frame, 0xFF)
+		frame = binary.BigEndian.AppendUint64(frame, uint64(payloadLength))
+	}
+
 	frame = append(frame, mask...)
 	frame = append(frame, maskedData...)
 
-	_, err := (*wsClient.connection).Write(frame)
-	if err != nil {
-		fmt.Printf("Send error: %s\n", err.Error())
+	n, err := (*wsClient.connection).Write(frame)
+	if n != len(frame) || err != nil {
+		fmt.Printf("Send error: %s, wrote %d/%d bytes\n", err.Error(), n, len(frame))
 	}
 }
 
