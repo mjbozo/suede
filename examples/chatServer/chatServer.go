@@ -13,17 +13,17 @@ func main() {
 		panic("could not start server")
 	}
 
-	server.OnConnect = func(client net.Conn) {
+	server.OnConnect(func(client net.Conn) {
 		server.BroadcastText([]byte("New user joined the chat!"))
-	}
+	})
 
-	server.OnDisconnect = func() {
+	server.OnDisconnect(func(client net.Conn) {
 		server.BroadcastText([]byte("User has left the chat"))
-	}
+	})
 
-	server.OnMessage = func(client net.Conn, data []byte) {
+	server.OnMessage(func(client net.Conn, data []byte) {
 		server.BroadcastText(data)
-	}
+	})
 
 	fmt.Println("Server starting")
 	server.Run()

@@ -23,9 +23,9 @@ func (err *WSClientError) Error() string {
 type wsclient struct {
 	host         string
 	path         string
-	OnConnect    func()
-	OnDisconnect func()
-	OnMessage    func([]byte)
+	onConnect    func()
+	onDisconnect func()
+	onMessage    func([]byte)
 	connection   net.Conn
 }
 
@@ -48,6 +48,18 @@ func WebSocket(rawURL string) (*wsclient, error) {
 	return wsClient, nil
 }
 
+func (wsClient *wsclient) OnConnect(connectCallback func()) {
+	wsClient.onConnect = connectCallback
+}
+
+func (wsClient *wsclient) OnDisconnect(disconnectCallback func()) {
+	wsClient.onDisconnect = disconnectCallback
+}
+
+func (wsClient *wsclient) OnMessage(messageCallback func([]byte)) {
+	wsClient.onMessage = messageCallback
+}
+
 // Connect initiates the WebSocket handshake with a WebSocket server. Once connected successfully
 // a new goroutine will be created which will read from the connection continuously, and return
 // control to the caller. A sync.WaitGroup must be managed by the caller. If wg.Wait() is not
@@ -60,8 +72,8 @@ func (wsClient *wsclient) Connect(wg *sync.WaitGroup) error {
 		return connectionErr
 	}
 
-	if wsClient.OnConnect != nil {
-		wsClient.OnConnect()
+	if wsClient.onConnect != nil {
+		wsClient.onConnect()
 	}
 
 	wg.Add(1)
@@ -172,8 +184,8 @@ func (wsClient *wsclient) readFromConnection(wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer wsClient.connection.Close()
 
-	if wsClient.OnDisconnect != nil {
-		defer wsClient.OnDisconnect()
+	if wsClient.onDisconnect != nil {
+		defer wsClient.onDisconnect()
 	}
 
 	readBuffer := make([]byte, 256)
@@ -238,8 +250,8 @@ ReadForever:
 			data = wsClient.readFrameData(readBuffer[10:], uint64(payloadLength64))
 		}
 
-		if wsClient.OnMessage != nil {
-			wsClient.OnMessage(data)
+		if wsClient.onMessage != nil {
+			wsClient.onMessage(data)
 		}
 	}
 }

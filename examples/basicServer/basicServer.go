@@ -14,18 +14,18 @@ func main() {
 		panic("Could not create WebSocket server")
 	}
 
-	wsServer.OnConnect = func(client net.Conn) {
+	wsServer.OnConnect(func(client net.Conn) {
 		fmt.Println("Client connected")
-	}
+	})
 
-	wsServer.OnDisconnect = func() {
+	wsServer.OnDisconnect(func(client net.Conn) {
 		fmt.Println("Client disconnected")
-	}
+	})
 
-	wsServer.OnMessage = func(client net.Conn, data []byte) {
+	wsServer.OnMessage(func(client net.Conn, data []byte) {
 		fmt.Printf("Message = %s\n", data)
 		wsServer.BroadcastText([]byte("broadcasting..."))
-	}
+	})
 
 	// Once created, the server can be started in 3 different ways:
 	// Run - simplest and least flexible

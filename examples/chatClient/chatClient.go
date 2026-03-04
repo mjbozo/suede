@@ -20,13 +20,13 @@ func main() {
 	name, _ := reader.ReadString('\n')
 	name = strings.ReplaceAll(name, "\n", "")
 
-	client.OnConnect = func() {
+	client.OnConnect(func() {
 		client.SendText([]byte(name + " has joined the chat"))
-	}
+	})
 
-	client.OnMessage = func(data []byte) {
+	client.OnMessage(func(data []byte) {
 		fmt.Printf("%s\n", data)
-	}
+	})
 
 	client.RunCallback(func() {
 		fmt.Println("Connected. Welcome to the chatroom.")
@@ -40,6 +40,11 @@ func main() {
 
 			fmt.Print("\u001b[1A\u001b[2K")
 			message = strings.ReplaceAll(message, "\n", "")
+
+			if message == ":quit" {
+				break
+			}
+
 			client.SendText([]byte("[" + name + "] " + message))
 		}
 	})

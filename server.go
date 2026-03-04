@@ -20,9 +20,9 @@ func (err *WSServerError) Error() string {
 type wsserver struct {
 	Host         uint16
 	Path         string
-	OnConnect    func(net.Conn)
-	OnDisconnect func()
-	OnMessage    func(net.Conn, []byte)
+	onConnect    func(net.Conn)
+	onDisconnect func(net.Conn)
+	onMessage    func(net.Conn, []byte)
 	active       bool
 	clients      []net.Conn
 }
@@ -35,6 +35,18 @@ func WebSocketServer(port uint16, path string) (*wsserver, error) {
 	}
 
 	return wsServer, nil
+}
+
+func (wsServer *wsserver) OnConnect(connectCallback func(net.Conn)) {
+	wsServer.onConnect = connectCallback
+}
+
+func (wsServer *wsserver) OnDisconnect(disconnectCallback func(net.Conn)) {
+	wsServer.onDisconnect = disconnectCallback
+}
+
+func (wsServer *wsserver) OnMessage(messageCallback func(net.Conn, []byte)) {
+	wsServer.onMessage = messageCallback
 }
 
 // Start spins up the WebSocket server entry point in a new goroutine, returning control to the
@@ -96,17 +108,18 @@ func (wsServer *wsserver) runServer(res http.ResponseWriter, req *http.Request) 
 		panic("Failed to close connection")
 	}
 
+	if wsServer.onDisconnect != nil {
+		wsServer.onDisconnect(connection)
+	}
+
 	for i := range wsServer.clients {
 		if wsServer.clients[i] == connection {
 			wsServer.clients = append(wsServer.clients[:i], wsServer.clients[i+1:]...)
 			break
 		}
 	}
-	connection = nil
 
-	if wsServer.OnDisconnect != nil {
-		wsServer.OnDisconnect()
-	}
+	connection = nil
 }
 
 func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Request) (net.Conn, error) {
@@ -133,8 +146,8 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 	content = append(content, "\r\n\r\n"...)
 	connection.Write(content)
 
-	if wsServer.OnConnect != nil {
-		wsServer.OnConnect(connection)
+	if wsServer.onConnect != nil {
+		wsServer.onConnect(connection)
 	}
 
 	return connection, nil
@@ -212,8 +225,8 @@ ReadForever:
 			data = wsServer.readFrameData(connection, maskValue, readBuffer[14:], uint64(payloadLength64))
 		}
 
-		if wsServer.OnMessage != nil {
-			wsServer.OnMessage(connection, data)
+		if wsServer.onMessage != nil {
+			wsServer.onMessage(connection, data)
 		}
 	}
 }

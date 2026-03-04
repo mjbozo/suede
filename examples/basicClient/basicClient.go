@@ -14,18 +14,18 @@ func main() {
 		return
 	}
 
-	wsClient.OnConnect = func() {
+	wsClient.OnConnect(func() {
 		fmt.Println("Suede WebSocket client connected")
 		wsClient.SendText([]byte("Hello I am a new client"))
-	}
+	})
 
-	wsClient.OnDisconnect = func() {
+	wsClient.OnDisconnect(func() {
 		fmt.Println("Disconnect callback")
-	}
+	})
 
-	wsClient.OnMessage = func(data []byte) {
+	wsClient.OnMessage(func(data []byte) {
 		fmt.Printf("Data = %s\n", data)
-	}
+	})
 
 	// Once created, the client can be started in 3 different ways:
 	// Run - simplest and least flexible
