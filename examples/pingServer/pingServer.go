@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/mjbozo/suede"
@@ -13,12 +17,20 @@ func main() {
 		panic("ws server failed to start")
 	}
 
-	wsServer.RunCallback(func() {
-		fmt.Println("WebSocket server started on port 8080 at path /ping")
-		tick := time.Tick(1000 * time.Millisecond)
-		for range tick {
+	go wsServer.Start(context.Background())
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	fmt.Printf("WebSocket server started on port %d at path %s\n", wsServer.Port, wsServer.Path)
+	for {
+		select {
+		case <-time.Tick(1000 * time.Millisecond):
 			fmt.Println("Pinging...")
 			wsServer.Ping()
+		case <-quit:
+			wsServer.Shutdown(context.Background())
+			return
 		}
-	})
+	}
 }

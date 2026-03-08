@@ -1,12 +1,17 @@
 package suede
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type WSServerError struct {
@@ -18,21 +23,24 @@ func (err *WSServerError) Error() string {
 }
 
 type wsserver struct {
-	Host         uint16
+	Port         uint16
 	Path         string
 	onConnect    func(net.Conn)
 	onDisconnect func(net.Conn)
 	onMessage    func(net.Conn, []byte)
-	active       bool
+	active       atomic.Bool
 	clients      []net.Conn
+	clientMutex  sync.Mutex
+	server       *http.Server
 }
 
 func WebSocketServer(port uint16, path string) (*wsserver, error) {
 	wsServer := &wsserver{
-		Host:   port,
-		Path:   path,
-		active: false,
+		Port: port,
+		Path: path,
 	}
+
+	wsServer.active.Store(false)
 
 	return wsServer, nil
 }
@@ -49,74 +57,84 @@ func (wsServer *wsserver) OnMessage(messageCallback func(net.Conn, []byte)) {
 	wsServer.onMessage = messageCallback
 }
 
-// Start spins up the WebSocket server entry point in a new goroutine, returning control to the
-// caller. A sync.WaitGroup is required and must be handled by the caller in the calling function.
-// If wg.Wait() is not called in the calling function, the WebSocket server will exit immediately.
-//
-// If the caller does not need to regain control, consider calling Run or RunCallback instead.
-func (wsServer *wsserver) Start(wg *sync.WaitGroup) {
-	http.HandleFunc(wsServer.Path, wsServer.runServer)
-	wg.Add(1)
-	go http.ListenAndServe(":"+fmt.Sprintf("%d", wsServer.Host), nil)
-	wsServer.active = true
-}
+// Start spins up the WebSocket server, blocking until server context is cancelled, or an unrecoverable error occurs
+func (wsServer *wsserver) Start(ctx context.Context) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc(wsServer.Path, wsServer.handleClientConnection)
 
-// RunCallback spins up the WebSocket server and runs the handler function passed as an argument.
-// RunCallback does not return control to the caller until the WebSocket server is shutdown.
-//
-// If the caller needs to regain control while the WebSocket server is active, consider calling
-// Start instead, and managing a sync.WaitGroup manually.
-func (wsServer *wsserver) RunCallback(handler func()) {
-	var wg sync.WaitGroup
-	wsServer.Start(&wg)
-
-	if handler != nil {
-		handler()
+	server := http.Server{
+		Handler: mux,
+		Addr:    ":" + fmt.Sprintf("%d", wsServer.Port),
 	}
 
-	wg.Wait()
-}
+	wsServer.server = &server
 
-// Run is an alias for RunCallback(nil). It is used to spin up the WebSocket Server which does not
-// have any handler behaviour. Run does not return control to the caller until the WebSocket server
-// is shutdown.
-//
-// If the caller needs to regain control while the WebSocket server is active, consider calling
-// Start instead, and managing a sync.WaitGroup manually.
-func (wsServer *wsserver) Run() {
-	wsServer.RunCallback(nil)
+	serverErrors := make(chan error)
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	wsServer.active.Store(true)
+
+	select {
+	case <-ctx.Done():
+		fmt.Println("Server context cancelled")
+	case serverError := <-serverErrors:
+		fmt.Println(serverError)
+	}
+
+	wsServer.Shutdown(ctx)
+
+	return ctx.Err()
 }
 
 func (wsServer *wsserver) IsActive() bool {
-	return wsServer.active
+	active := wsServer.active.Load()
+	return active
 }
 
 func (wsServer *wsserver) Clients() []net.Conn {
-	return wsServer.clients
+	var clients []net.Conn
+
+	wsServer.clientMutex.Lock()
+	clients = wsServer.clients
+	wsServer.clientMutex.Unlock()
+
+	return clients
 }
 
-func (wsServer *wsserver) runServer(res http.ResponseWriter, req *http.Request) {
+func (wsServer *wsserver) handleClientConnection(res http.ResponseWriter, req *http.Request) {
 	connection, connectionErr := wsServer.handleConnection(res, req)
 	if connectionErr != nil {
 		panic("Connection failed")
 	}
 
-	wsServer.readFromConnection(connection)
+	readBuffer := make([]byte, 256)
+	var connectionError error
+	for connectionError == nil {
+		connectionError = wsServer.readFromConnection(connection, readBuffer)
+	}
+
+	if errors.Is(connectionError, os.ErrDeadlineExceeded) {
+		return
+	}
 
 	closeErr := connection.Close()
 	if closeErr != nil {
 		panic("Failed to close connection")
 	}
 
-	if wsServer.onDisconnect != nil {
-		wsServer.onDisconnect(connection)
-	}
-
+	wsServer.clientMutex.Lock()
 	for i := range wsServer.clients {
 		if wsServer.clients[i] == connection {
 			wsServer.clients = append(wsServer.clients[:i], wsServer.clients[i+1:]...)
 			break
 		}
+	}
+	wsServer.clientMutex.Unlock()
+
+	if wsServer.onDisconnect != nil {
+		wsServer.onDisconnect(connection)
 	}
 
 	connection = nil
@@ -128,15 +146,24 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 	}
 
 	wsKey := req.Header.Get("Sec-WebSocket-Key")
-	wsAccept := GenerateWSAccept(wsKey)
+	if wsKey == "" {
+		return nil, &WSServerError{message: "Empty Sec-WebSocket-Key header value"}
+	}
 
+	wsAccept := GenerateWSAccept(wsKey)
 	hijacker, ok := res.(http.Hijacker)
 	if !ok {
+		return nil, &WSServerError{message: "ResponseWriter is not a http.Hijacker"}
+	}
+
+	connection, _, err := hijacker.Hijack()
+	if err != nil {
 		return nil, &WSServerError{message: "Failed to hijack the connection"}
 	}
 
-	connection, _, _ := hijacker.Hijack()
+	wsServer.clientMutex.Lock()
 	wsServer.clients = append(wsServer.clients, connection)
+	wsServer.clientMutex.Unlock()
 
 	var content []byte
 	content = append(content, "HTTP/1.1 101 Switching Protocols\r\n"...)
@@ -153,82 +180,79 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 	return connection, nil
 }
 
-func (wsServer *wsserver) readFromConnection(connection net.Conn) {
-	readBuffer := make([]byte, 256)
-
-ReadForever:
-	for true {
-		bytesRead, readErr := connection.Read(readBuffer)
-		if readErr != nil {
-			if readErr == io.EOF {
-				fmt.Println("Client disconnected")
-			} else {
-				fmt.Printf("Read Error: %s\n", readErr.Error())
-			}
-
-			break ReadForever
+func (wsServer *wsserver) readFromConnection(connection net.Conn, readBuffer []byte) error {
+	bytesRead, readErr := connection.Read(readBuffer)
+	if readErr != nil {
+		if readErr == io.EOF {
+			fmt.Println("Client disconnected")
+		} else {
+			fmt.Printf("Read Error: %s\n", readErr.Error())
 		}
 
-		if bytesRead < 2 {
-			fmt.Println("Not enough bytes for a frame")
-			continue
-		}
-
-		controlByte := readBuffer[0]
-		opCode := controlByte & 0b00001111
-		switch opCode {
-		case 0x8:
-			break ReadForever
-
-		case 0x9:
-			// ping
-			fmt.Println("got a ping, sending a pong")
-			wsServer.pong(connection)
-			continue
-
-		case 0xA:
-			// pong
-			fmt.Println("got a pong")
-			continue
-
-		default:
-		}
-
-		payloadInfoByte := readBuffer[1]
-		mask := payloadInfoByte & 0b10000000
-		if mask == 0 {
-			fmt.Println("Client should set mask bit")
-			break
-		}
-
-		payloadLength := payloadInfoByte & 0b01111111
-
-		data := make([]byte, 0, payloadLength)
-		switch {
-		case payloadLength < 126:
-			maskValue := readBuffer[2:6]
-			data = wsServer.readFrameData(connection, maskValue, readBuffer[6:], uint64(payloadLength))
-
-		case payloadLength == 126:
-			sizeBytes := []byte{readBuffer[2], readBuffer[3]}
-			maskValue := readBuffer[4:8]
-			payloadLength16 := binary.BigEndian.Uint16(sizeBytes)
-			data = wsServer.readFrameData(connection, maskValue, readBuffer[8:], uint64(payloadLength16))
-
-		case payloadLength == 127:
-			sizeBytes := []byte{
-				readBuffer[2], readBuffer[3], readBuffer[4], readBuffer[5],
-				readBuffer[6], readBuffer[7], readBuffer[8], readBuffer[9],
-			}
-			maskValue := readBuffer[10:14]
-			payloadLength64 := binary.BigEndian.Uint64(sizeBytes)
-			data = wsServer.readFrameData(connection, maskValue, readBuffer[14:], uint64(payloadLength64))
-		}
-
-		if wsServer.onMessage != nil {
-			wsServer.onMessage(connection, data)
-		}
+		return readErr
 	}
+
+	if bytesRead < 2 {
+		fmt.Println("Not enough bytes for a frame")
+		return nil
+	}
+
+	controlByte := readBuffer[0]
+	opCode := controlByte & 0b00001111
+	switch opCode {
+	case 0x8:
+		// close
+		connection.Write([]byte{0x88, 0x02, 0x03, 0xE8})
+		return &WSServerError{message: "Connection closed"}
+
+	case 0x9:
+		// ping
+		fmt.Println("got a ping, sending a pong")
+		wsServer.pong(connection)
+		return nil
+
+	case 0xA:
+		// pong
+		fmt.Println("got a pong")
+		return nil
+	}
+
+	payloadInfoByte := readBuffer[1]
+	mask := payloadInfoByte & 0b10000000
+	if mask == 0 {
+		fmt.Println("Client should set mask bit")
+		return &WSServerError{message: "Mask bit not set by client"}
+	}
+
+	payloadLength := payloadInfoByte & 0b01111111
+
+	data := make([]byte, 0, payloadLength)
+	switch {
+	case payloadLength < 126:
+		maskValue := readBuffer[2:6]
+		data = wsServer.readFrameData(connection, maskValue, readBuffer[6:], uint64(payloadLength))
+
+	case payloadLength == 126:
+		sizeBytes := []byte{readBuffer[2], readBuffer[3]}
+		maskValue := readBuffer[4:8]
+		payloadLength16 := binary.BigEndian.Uint16(sizeBytes)
+		data = wsServer.readFrameData(connection, maskValue, readBuffer[8:], uint64(payloadLength16))
+
+	case payloadLength == 127:
+		sizeBytes := []byte{
+			readBuffer[2], readBuffer[3], readBuffer[4], readBuffer[5],
+			readBuffer[6], readBuffer[7], readBuffer[8], readBuffer[9],
+		}
+		maskValue := readBuffer[10:14]
+		payloadLength64 := binary.BigEndian.Uint64(sizeBytes)
+		data = wsServer.readFrameData(connection, maskValue, readBuffer[14:], uint64(payloadLength64))
+	}
+
+	if wsServer.onMessage != nil {
+		wsServer.onMessage(connection, data)
+	}
+
+	return nil
 }
 
 func (wsServer *wsserver) readFrameData(connection net.Conn, mask []byte, readBuffer []byte, length uint64) []byte {
@@ -316,13 +340,68 @@ func (wsServer *wsserver) BroadcastBinary(data []byte) {
 }
 
 func (wsServer *wsserver) broadcast(data []byte, isBinary bool) {
+	wsServer.clientMutex.Lock()
+	defer wsServer.clientMutex.Unlock()
+
 	for _, client := range wsServer.clients {
 		wsServer.send(client, data, isBinary)
 	}
 }
 
-func (wsServer *wsserver) Close() {
-	// TODO: this
+func (wsServer *wsserver) Shutdown(ctx context.Context) error {
+	if !wsServer.active.Load() {
+		return nil
+	}
+
+	wsServer.active.Store(false)
+	shutdownErr := make(chan error, 1)
+	wsServer.Close(shutdownErr)
+	wsServer.server.Close()
+	return nil
+}
+
+func (wsServer *wsserver) Close(shutdownErr chan<- error) {
+	fmt.Println("Attempting graceful shutdown")
+	wsServer.clientMutex.Lock()
+	defer wsServer.clientMutex.Unlock()
+
+	for _, client := range wsServer.clients {
+		shutdownErr <- wsServer.closeClient(client)
+	}
+}
+
+func (wsServer *wsserver) closeClient(client net.Conn) error {
+	// force normal read goroutine to exit
+	client.SetReadDeadline(time.Now())
+
+	payload := []byte("Server closed connection")
+	payloadSize := len(payload) + 2
+
+	data := make([]byte, 0)
+	data = append(data, 0x88)
+	data = append(data, byte(payloadSize))
+	data = append(data, []byte{0x03, 0xE8}...) // 1000 - Normal Closure
+	data = append(data, payload...)
+	client.Write(data)
+
+	// wait for client close confirmation
+	closeBuf := make([]byte, 2)
+	client.SetDeadline(time.Now().Add(5 * time.Second))
+	n, err := client.Read(closeBuf)
+	if n != len(closeBuf) || err != nil {
+		return &WSServerError{message: "Error closing client"}
+	}
+
+	if closeBuf[0] != 0x88 {
+		fmt.Printf("Error: expected close response, got: %x\n", closeBuf)
+		fmt.Println("Closing connection anyway")
+	}
+
+	if err = client.Close(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (wsServer *wsserver) Ping() {

@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
-	"sync"
 
 	"github.com/mjbozo/suede"
 )
@@ -27,27 +27,15 @@ func main() {
 		wsServer.BroadcastText([]byte("broadcasting..."))
 	})
 
-	// Once created, the server can be started in 3 different ways:
-	// Run - simplest and least flexible
-	wsServer.Run()
-
-	// RunCallback - same as run, but executes a callback while the server is active
-	wsServer.RunCallback(func() {
-		fmt.Println("Suede WebSocket server running")
-		fmt.Printf("Port: %s\tPath: %s\n", fmt.Sprintf("%d", wsServer.Host), wsServer.Path)
-		// add any additional logic here
-	})
-
-	// Start - most flexible as it returns control to caller.
-	// However, it requires an externally handled WaitGroup
-	var wg sync.WaitGroup
-	wsServer.Start(&wg)
+	done := make(chan error, 1)
+	go func() {
+		done <- wsServer.Start(context.Background())
+	}()
 
 	// add any additional logic here, which will be executed as normal program
 	// for example:
 	fmt.Println("Suede WebSocket server running")
-	fmt.Printf("Port: %s\tPath: %s\n", fmt.Sprintf("%d", wsServer.Host), wsServer.Path)
+	fmt.Printf("Port: %s\tPath: %s\n", fmt.Sprintf("%d", wsServer.Port), wsServer.Path)
 
-	wg.Wait()
-	// End of `Start` example
+	<-done
 }

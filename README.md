@@ -10,6 +10,7 @@ See examples for current capabilities.
 ### Client
 ```go
 import (
+    "context"
 	"fmt"
 	"github.com/mjbozo/suede"
 )
@@ -37,44 +38,14 @@ func main() {
 	}
 
 	// connect and run client
-	wsClient.Run()
+	wsClient.Start(context.Background())
 }
 ```
 
-If additional control is required, a callback can be used to run while the WebSocket client is connected:
-```go
-...
-
-wsClient.RunCallback(func() {
-	// this code runs after client connects
-	fmt.Println("Client running...")
-})
-```
-
-Even further control can be gained by calling `Connect()` directly and managing a `sync.WaitGroup`.
-```go
-import (
-	...
-	"sync"
-)
-
-...
-
-var wg sync.WaitGroup
-connectErr := wsClient.Connect(&wg)
-if connectErr != nil {
-	panic("WebSocket client failed to connect")
-}
-
-// this code runs as normal after client connects
-fmt.Println("Client running...")
-
-// manually wait for client to disconnect
-wg.Wait()
-```
 ### Server
  ```go
 import (
+    "context"
 	"fmt"
 	 "github.com/mjbozo/suede"
 )
@@ -101,38 +72,18 @@ func main() {
 		fmt.Printf("Received message: %s\n", data)
 	}
 
-	// start the server
-	wsServer.Run()
+	done := make(chan error, 1)
+	go func() {
+		done <- wsServer.Start(context.Background())
+	}()
+
+	// add any additional logic here, which will be executed as normal program
+	// for example:
+	fmt.Println("Suede WebSocket server running")
+	fmt.Printf("Port: %s\tPath: %s\n", fmt.Sprintf("%d", wsServer.Port), wsServer.Path)
+
+	<-done
 }
-```
-
-Like the client, additional control can be gained by calling either `RunCallback()` or `Start()` methods on the WebSocket server.
-```go
-...
-
-wsServer.RunCallback(func() {
-	// this code runs after server starts
-	fmt.Println("Server running...")
-})
-```
-
-
-```go
-import (
-	...
-	"sync"
-)
-
-...
-
-var wg sync.WaitGroup
-wsServer.Start(&wg)
-
-// this code runs as normal after server starts
-fmt.Println("Server running...")
-
-// manually wait for server to shutdown
-wg.Wait()
 ```
 
 ---

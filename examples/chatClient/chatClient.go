@@ -2,9 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/mjbozo/suede"
 )
@@ -21,6 +24,7 @@ func main() {
 	name = strings.ReplaceAll(name, "\n", "")
 
 	client.OnConnect(func() {
+		fmt.Println("Connected. Welcome to the chatroom.")
 		client.SendText([]byte(name + " has joined the chat"))
 	})
 
@@ -28,10 +32,25 @@ func main() {
 		fmt.Printf("%s\n", data)
 	})
 
-	client.RunCallback(func() {
-		fmt.Println("Connected. Welcome to the chatroom.")
-		reader := bufio.NewReader(os.Stdin)
-		for true {
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	clientError := make(chan error, 1)
+
+	go func() {
+		clientError <- client.Start(context.Background())
+	}()
+
+	fmt.Println("Server starting")
+	for {
+		select {
+		case <-quit:
+			client.Close()
+			return
+		case <-clientError:
+			client.Close()
+			return
+		default:
 			message, err := reader.ReadString('\n')
 			if err != nil {
 				fmt.Println("Read error")
@@ -42,10 +61,11 @@ func main() {
 			message = strings.ReplaceAll(message, "\n", "")
 
 			if message == ":quit" {
-				break
+				client.Close()
+				return
 			}
 
 			client.SendText([]byte("[" + name + "] " + message))
 		}
-	})
+	}
 }

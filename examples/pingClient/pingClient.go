@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -10,15 +11,18 @@ import (
 func main() {
 	wsClient, wsErr := suede.WebSocket("http://localhost:8080/ping")
 	if wsErr != nil {
-		panic("ws client failed to create")
+		panic("ws client failed to initialise")
 	}
 
-	wsClient.RunCallback(func() {
+	wsClient.OnConnect(func() {
 		fmt.Println("WS Client connected, pinging...")
+
 		tick := time.Tick(1000 * time.Millisecond)
 		for range tick {
 			fmt.Println("Pinging...")
 			wsClient.Ping()
 		}
 	})
+
+	wsClient.Start(context.Background())
 }

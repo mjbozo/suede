@@ -2,6 +2,7 @@ package suede
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -9,7 +10,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
-	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type WSClientError struct {
@@ -27,6 +29,8 @@ type wsclient struct {
 	onDisconnect func()
 	onMessage    func([]byte)
 	connection   net.Conn
+	errCh        chan error
+	active       atomic.Bool
 }
 
 func WebSocket(rawURL string) (*wsclient, error) {
@@ -45,6 +49,8 @@ func WebSocket(rawURL string) (*wsclient, error) {
 		path: urlObject.Path,
 	}
 
+	wsClient.active.Store(true)
+
 	return wsClient, nil
 }
 
@@ -60,13 +66,9 @@ func (wsClient *wsclient) OnMessage(messageCallback func([]byte)) {
 	wsClient.onMessage = messageCallback
 }
 
-// Connect initiates the WebSocket handshake with a WebSocket server. Once connected successfully
+// Start initiates the WebSocket handshake with a WebSocket server. Once connected successfully
 // a new goroutine will be created which will read from the connection continuously, and return
-// control to the caller. A sync.WaitGroup must be managed by the caller. If wg.Wait() is not
-// called in the calling function, the WebSocket client will disconnect immediately.
-//
-// If the caller does not need to regain control, consider calling Run or RuCallback instead.
-func (wsClient *wsclient) Connect(wg *sync.WaitGroup) error {
+func (wsClient *wsclient) Start(ctx context.Context) error {
 	connectionErr := wsClient.handleConnection()
 	if connectionErr != nil {
 		return connectionErr
@@ -76,42 +78,68 @@ func (wsClient *wsclient) Connect(wg *sync.WaitGroup) error {
 		wsClient.onConnect()
 	}
 
-	wg.Add(1)
-	go wsClient.readFromConnection(wg)
+	readBuffer := make([]byte, 256)
+	go func() {
+		wsClient.errCh <- wsClient.readFromConnection(readBuffer)
+	}()
+
+	select {
+	case <-ctx.Done():
+		// graceful shutdown
+		fmt.Println("Client context done")
+	case <-wsClient.errCh:
+		// error occured
+		fmt.Println("Client error channel triggered")
+	}
+
+	closeErr := wsClient.Close()
+	if closeErr != nil {
+		return closeErr
+	}
+
+	if wsClient.onDisconnect != nil {
+		wsClient.onDisconnect()
+	}
 
 	return nil
 }
 
-// RunCallback initiates the WebSocket handshake with a WebSocker server, and upon successful
-// connection, runs the handler function passed as an argument. RunCallback does not return control
-// to the caller until the WebSocket client disconnects.
-//
-// If the caller needs to regain control while the WebSocket client is connected, consider calling
-// Connect instead, and managing a sync.WaitGroup manually.
-func (wsClient *wsclient) RunCallback(handler func()) error {
-	var wg sync.WaitGroup
-	connectErr := wsClient.Connect(&wg)
-	if connectErr != nil {
-		return connectErr
+func (wsClient *wsclient) Close() error {
+	if !wsClient.active.Load() {
+		return nil
 	}
 
-	if handler != nil {
-		handler()
+	wsClient.active.Store(false)
+	wsClient.connection.SetReadDeadline(time.Now())
+
+	payload := []byte("Client closed connection")
+	payloadSize := len(payload) + 2
+
+	data := make([]byte, 0)
+	data = append(data, 0x88)
+	data = append(data, byte(payloadSize))
+	data = append(data, []byte{0x03, 0xE8}...) // 1000 - Normal Closure
+	data = append(data, payload...)
+	wsClient.connection.Write(data)
+
+	// wait for client close confirmation
+	closeBuf := make([]byte, 2)
+	wsClient.connection.SetDeadline(time.Now().Add(5 * time.Second))
+	n, err := wsClient.connection.Read(closeBuf)
+	if n != len(closeBuf) || err != nil {
+		return &WSServerError{message: "Error closing connection safely"}
 	}
 
-	wg.Wait()
+	if closeBuf[0] != 0x88 {
+		fmt.Printf("Error: expected close response, got: %x\n", closeBuf)
+		fmt.Println("Closing connection anyway")
+	}
+
+	if err = wsClient.connection.Close(); err != nil {
+		return err
+	}
+
 	return nil
-}
-
-// Run is an alias for RunCallback(nil). It is used to initiate the WebSocket handshake with a
-// WebSocket server, but does not execute any callback function. Run does not return control to the
-// caller until the WebSocket client disconnects.
-//
-// If the caller needs to regain control while the WebSocket client is connected, consider calling
-// Connect instead, and managing a sync.WaitGroup manually.
-func (wsClient *wsclient) Run() error {
-	runErr := wsClient.RunCallback(nil)
-	return runErr
 }
 
 func (wsClient *wsclient) handleConnection() error {
@@ -148,7 +176,7 @@ func (wsClient *wsclient) handleConnection() error {
 	}
 
 	responseReader := bytes.NewBuffer(ackBuffer)
-	for true {
+	for {
 		line, readStrError := responseReader.ReadString('\n')
 		if readStrError != nil {
 			if readStrError == io.EOF {
@@ -180,53 +208,45 @@ func (wsClient *wsclient) handleConnection() error {
 	return nil
 }
 
-func (wsClient *wsclient) readFromConnection(wg *sync.WaitGroup) {
-	defer wg.Done()
-	defer wsClient.connection.Close()
-
-	if wsClient.onDisconnect != nil {
-		defer wsClient.onDisconnect()
-	}
-
-	readBuffer := make([]byte, 256)
-
-ReadForever:
-	for true {
+func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
+	for {
 		bytesRead, readErr := wsClient.connection.Read(readBuffer)
 		if readErr != nil {
 			fmt.Printf("Read Error: %s\n", readErr.Error())
-			break ReadForever
+			return &WSClientError{message: "Read error occurred"}
 		}
 
 		if bytesRead < 2 {
 			fmt.Println("Not enough bytes for a frame")
-			continue
+			return nil
 		}
 
 		controlByte := readBuffer[0]
 		opCode := controlByte & 0b00001111
 		switch opCode {
 		case 0x8:
-			break ReadForever
+			// close
+			fmt.Println("Got close request")
+			wsClient.connection.Write([]byte{0x88, 0x02, 0x03, 0xE8})
+			return &WSClientError{message: "Connection closed"}
 
 		case 0x9:
 			// ping
 			fmt.Println("got a ping, sending pong")
 			wsClient.pong(wsClient.connection)
+			continue
 
 		case 0xA:
 			// pong
 			fmt.Println("got a pong")
 			continue
-
-		default:
 		}
 
 		payloadInfoByte := readBuffer[1]
 		mask := payloadInfoByte & 0b10000000
 		if mask > 0 {
 			fmt.Println("Server should not set mask bit")
-			break
+			return &WSClientError{message: "Server set mask bit"}
 		}
 
 		payloadLength := payloadInfoByte & 0b01111111

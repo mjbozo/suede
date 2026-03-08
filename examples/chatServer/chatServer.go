@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/mjbozo/suede"
 )
@@ -25,6 +29,20 @@ func main() {
 		server.BroadcastText(data)
 	})
 
-	fmt.Println("Server starting")
-	server.Run()
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	serverError := make(chan error, 1)
+
+	go func() {
+		fmt.Println("Server starting")
+		serverError <- server.Start(context.Background())
+	}()
+
+	select {
+	case <-quit:
+	case <-serverError:
+	}
+
+	server.Shutdown(context.Background())
 }
