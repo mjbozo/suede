@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/mjbozo/suede/debug"
 )
 
 type WSServerError struct {
@@ -81,9 +83,9 @@ func (wsServer *wsserver) Start(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		fmt.Println("Server context cancelled")
+		debug.Println("Server context cancelled")
 	case serverError := <-serverErrors:
-		fmt.Println(serverError)
+		debug.Println(serverError)
 	}
 
 	wsServer.Shutdown(ctx)
@@ -155,7 +157,7 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 
 	wsServer.clientMutex.Lock()
 	clientID := generateClientID()
-	fmt.Printf("Connecting client with ID: %s\n", clientID)
+	debug.Printf("Connecting client with ID: %s\n", clientID)
 	wsServer.clients[clientID] = connection
 	wsServer.clientMutex.Unlock()
 
@@ -178,16 +180,16 @@ func (wsServer *wsserver) readFromConnection(connection net.Conn, readBuffer []b
 	bytesRead, readErr := connection.Read(readBuffer)
 	if readErr != nil {
 		if readErr == io.EOF {
-			fmt.Println("Client disconnected")
+			debug.Println("Client disconnected")
 		} else {
-			fmt.Printf("Read Error: %s\n", readErr.Error())
+			debug.Printf("Read Error: %s\n", readErr.Error())
 		}
 
 		return readErr
 	}
 
 	if bytesRead < 2 {
-		fmt.Println("Not enough bytes for a frame")
+		debug.Println("Not enough bytes for a frame")
 		return nil
 	}
 
@@ -196,24 +198,24 @@ func (wsServer *wsserver) readFromConnection(connection net.Conn, readBuffer []b
 
 	switch opCode {
 	case OP_CLOSE_CONN:
-		fmt.Println("got close request")
+		debug.Println("got close request")
 		connection.Write([]byte{0x88, 0x02, 0x03, 0xE8})
 		return &WSServerError{message: "Connection closed"}
 
 	case OP_PING:
-		fmt.Println("got a ping, sending a pong")
+		debug.Println("got a ping, sending a pong")
 		wsServer.pong(connection)
 		return nil
 
 	case OP_PONG:
-		fmt.Println("got a pong")
+		debug.Println("got a pong")
 		return nil
 	}
 
 	payloadInfoByte := readBuffer[1]
 	mask := payloadInfoByte & 0b10000000
 	if mask == 0 {
-		fmt.Println("Client should set mask bit")
+		debug.Println("Client should set mask bit")
 		return &WSServerError{message: "Mask bit not set by client"}
 	}
 
@@ -263,8 +265,8 @@ func (wsServer *wsserver) readFrameData(connection net.Conn, mask []byte, readBu
 	frameBuffer := make([]byte, bytesRemaining)
 	bytesRead, err := connection.Read(frameBuffer)
 	if err != nil {
-		fmt.Println("Continutation read err")
-		fmt.Println(err.Error())
+		debug.Println("Continutation read err")
+		debug.Println(err.Error())
 	}
 
 	offset := len(data) % 4
@@ -350,7 +352,7 @@ func (wsServer *wsserver) broadcast(controlByte byte, data []byte) {
 
 	for _, client := range wsServer.clients {
 		if err := wsServer.send(client, controlByte, data); err != nil {
-			fmt.Println("Failed to broadcast to client")
+			debug.Println("Failed to broadcast to client")
 		}
 	}
 }
@@ -377,7 +379,7 @@ func (wsServer *wsserver) Shutdown(ctx context.Context) error {
 
 func (wsServer *wsserver) closeClient(client net.Conn) error {
 	// force normal read goroutine to exit
-	fmt.Println("closing client")
+	debug.Println("closing client")
 	client.SetReadDeadline(time.Now())
 
 	controlByte := FINAL_FRAGMENT | OP_CLOSE_CONN
@@ -399,8 +401,8 @@ func (wsServer *wsserver) closeClient(client net.Conn) error {
 	}
 
 	if closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
-		fmt.Printf("Error: expected close response, got: %x\n", closeBuf)
-		fmt.Println("Closing connection anyway")
+		debug.Printf("Error: expected close response, got: %x\n", closeBuf)
+		debug.Println("Closing connection anyway")
 	}
 
 	if err = client.Close(); err != nil {

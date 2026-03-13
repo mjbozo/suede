@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/mjbozo/suede/debug"
 )
 
 type WSClientError struct {
@@ -35,7 +37,7 @@ type wsclient struct {
 func WebSocket(rawURL string) (*wsclient, error) {
 	urlObject, urlErr := url.Parse(rawURL)
 	if urlErr != nil {
-		fmt.Printf("Error creating URL object: %s\n", urlErr.Error())
+		debug.Printf("Error creating URL object: %s\n", urlErr.Error())
 		return nil, urlErr
 	}
 
@@ -86,12 +88,12 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		// graceful shutdown
-		fmt.Println("Client context done")
+		debug.Println("Client context done")
 
 	case e := <-clientErrors:
 		// error occured
-		fmt.Println("Client error channel triggered")
-		fmt.Println(e)
+		debug.Println("Client error channel triggered")
+		debug.Println(e)
 		return e
 	}
 
@@ -115,7 +117,7 @@ func (wsClient *wsclient) IsActive() bool {
 func (wsClient *wsclient) handleConnection() error {
 	conn, connErr := net.Dial("tcp", wsClient.host)
 	if connErr != nil {
-		fmt.Printf("Error connecting to %s, terminating connection.\n", wsClient.host)
+		debug.Printf("Error connecting to %s, terminating connection.\n", wsClient.host)
 		if conn != nil {
 			conn.Close()
 		}
@@ -140,7 +142,7 @@ func (wsClient *wsclient) handleConnection() error {
 	ackBuffer := make([]byte, 256)
 	_, readErr := conn.Read(ackBuffer)
 	if readErr != nil {
-		fmt.Println(readErr.Error())
+		debug.Println(readErr.Error())
 		conn.Close()
 		return readErr
 	}
@@ -153,7 +155,7 @@ func (wsClient *wsclient) handleConnection() error {
 				break
 			}
 
-			fmt.Printf("Read Error: %s\n", readStrError.Error())
+			debug.Printf("Read Error: %s\n", readStrError.Error())
 			conn.Close()
 			return readStrError
 		}
@@ -161,14 +163,14 @@ func (wsClient *wsclient) handleConnection() error {
 		switch {
 		case strings.HasPrefix(line, "Upgrade"):
 			if !strings.HasSuffix(line, "websocket\r\n") {
-				fmt.Println("Response not a WebSocket upgrade")
+				debug.Println("Response not a WebSocket upgrade")
 				return &WSClientError{message: "Server response not a WebSocket upgrade"}
 			}
 
 		case strings.HasPrefix(line, "Sec-WebSocket-Accept"):
 			headerValue := strings.Split(line, ": ")[1]
 			if strings.TrimSpace(headerValue) != string(wsAccept) {
-				fmt.Printf("Invalid WS Key.\nExpected: %s\nReceived: %s\n",
+				debug.Printf("Invalid WS Key.\nExpected: %s\nReceived: %s\n",
 					wsAccept, headerValue)
 				return &WSClientError{message: "Server responded with invalid WebSocket key"}
 			}
@@ -182,12 +184,12 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 	for {
 		bytesRead, readErr := wsClient.connection.Read(readBuffer)
 		if readErr != nil {
-			fmt.Printf("Read Error: %s\n", readErr.Error())
+			debug.Printf("Read Error: %s\n", readErr.Error())
 			return &WSClientError{message: "Read error occurred"}
 		}
 
 		if bytesRead < 2 {
-			fmt.Println("Not enough bytes for a frame")
+			debug.Println("Not enough bytes for a frame")
 			return nil
 		}
 
@@ -197,24 +199,24 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 		switch opCode {
 		case OP_CLOSE_CONN:
 			code := binary.BigEndian.Uint16(readBuffer[2:4])
-			fmt.Printf("Close code: %d\n", code)
+			debug.Printf("Close code: %d\n", code)
 			wsClient.connection.Write([]byte{0x88, 0x02, 0x03, 0xE8})
 			return &WSClientError{message: "Connection closed"}
 
 		case OP_PING:
-			fmt.Println("got a ping, sending pong")
+			debug.Println("got a ping, sending pong")
 			wsClient.pong(wsClient.connection)
 			continue
 
 		case OP_PONG:
-			fmt.Println("got a pong")
+			debug.Println("got a pong")
 			continue
 		}
 
 		payloadInfoByte := readBuffer[1]
 		mask := payloadInfoByte & 0b10000000
 		if mask > 0 {
-			fmt.Println("Server should not set mask bit")
+			debug.Println("Server should not set mask bit")
 			return &WSClientError{message: "Server set mask bit"}
 		}
 
@@ -259,8 +261,8 @@ func (wsClient *wsclient) readFrameData(readBuffer []byte, length uint64) []byte
 	frameBuffer := make([]byte, bytesRemaining)
 	bytesRead, err := wsClient.connection.Read(frameBuffer)
 	if err != nil {
-		fmt.Println("Continutation read err")
-		fmt.Println(err.Error())
+		debug.Println("Continutation read err")
+		debug.Println(err.Error())
 	}
 
 	for i := 0; i < bytesRead; i++ {
@@ -320,7 +322,7 @@ func (wsClient *wsclient) send(controlByte byte, data []byte) {
 
 	n, err := wsClient.connection.Write(frame)
 	if n != len(frame) || err != nil {
-		fmt.Printf("Send error: %s, wrote %d/%d bytes\n", err.Error(), n, len(frame))
+		debug.Printf("Send error: %s, wrote %d/%d bytes\n", err.Error(), n, len(frame))
 	}
 }
 
@@ -350,8 +352,8 @@ func (wsClient *wsclient) Close() error {
 	}
 
 	if closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
-		fmt.Printf("Error: expected close response, got: %x\n", closeBuf)
-		fmt.Println("Closing connection anyway")
+		debug.Printf("Error: expected close response, got: %x\n", closeBuf)
+		debug.Println("Closing connection anyway")
 	}
 
 	if err = wsClient.connection.Close(); err != nil {
