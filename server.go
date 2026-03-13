@@ -2,7 +2,9 @@ package suede
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -29,15 +31,16 @@ type wsserver struct {
 	onDisconnect func(net.Conn)
 	onMessage    func(net.Conn, []byte)
 	active       atomic.Bool
-	clients      []net.Conn
+	clients      map[string]net.Conn
 	clientMutex  sync.Mutex
 	server       *http.Server
 }
 
 func WebSocketServer(port uint16, path string) (*wsserver, error) {
 	wsServer := &wsserver{
-		Port: port,
-		Path: path,
+		Port:    port,
+		Path:    path,
+		clients: make(map[string]net.Conn),
 	}
 
 	wsServer.active.Store(false)
@@ -93,21 +96,15 @@ func (wsServer *wsserver) IsActive() bool {
 	return active
 }
 
-func (wsServer *wsserver) Clients() []net.Conn {
-	var clients []net.Conn
-
-	wsServer.clientMutex.Lock()
-	clients = wsServer.clients
-	wsServer.clientMutex.Unlock()
-
-	return clients
-}
-
 func (wsServer *wsserver) handleClientConnection(res http.ResponseWriter, req *http.Request) {
-	connection, connectionErr := wsServer.handleConnection(res, req)
+	clientID, connectionErr := wsServer.handleConnection(res, req)
 	if connectionErr != nil {
 		panic("Connection failed")
 	}
+
+	wsServer.clientMutex.Lock()
+	connection := wsServer.clients[clientID]
+	wsServer.clientMutex.Unlock()
 
 	readBuffer := make([]byte, 256)
 	var connectionError error
@@ -125,12 +122,7 @@ func (wsServer *wsserver) handleClientConnection(res http.ResponseWriter, req *h
 	}
 
 	wsServer.clientMutex.Lock()
-	for i := range wsServer.clients {
-		if wsServer.clients[i] == connection {
-			wsServer.clients = append(wsServer.clients[:i], wsServer.clients[i+1:]...)
-			break
-		}
-	}
+	delete(wsServer.clients, clientID)
 	wsServer.clientMutex.Unlock()
 
 	if wsServer.onDisconnect != nil {
@@ -140,29 +132,31 @@ func (wsServer *wsserver) handleClientConnection(res http.ResponseWriter, req *h
 	connection = nil
 }
 
-func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Request) (net.Conn, error) {
+func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Request) (string, error) {
 	if req.Header.Get("Upgrade") != "websocket" {
-		return nil, &WSServerError{message: "Request header not requesting websocket upgrade"}
+		return "", &WSServerError{message: "Request header not requesting websocket upgrade"}
 	}
 
 	wsKey := req.Header.Get("Sec-WebSocket-Key")
 	if wsKey == "" {
-		return nil, &WSServerError{message: "Empty Sec-WebSocket-Key header value"}
+		return "", &WSServerError{message: "Empty Sec-WebSocket-Key header value"}
 	}
 
 	wsAccept := GenerateWSAccept(wsKey)
 	hijacker, ok := res.(http.Hijacker)
 	if !ok {
-		return nil, &WSServerError{message: "ResponseWriter is not a http.Hijacker"}
+		return "", &WSServerError{message: "ResponseWriter is not a http.Hijacker"}
 	}
 
 	connection, _, err := hijacker.Hijack()
 	if err != nil {
-		return nil, &WSServerError{message: "Failed to hijack the connection"}
+		return "", &WSServerError{message: "Failed to hijack the connection"}
 	}
 
 	wsServer.clientMutex.Lock()
-	wsServer.clients = append(wsServer.clients, connection)
+	clientID := generateClientID()
+	fmt.Printf("Connecting client with ID: %s\n", clientID)
+	wsServer.clients[clientID] = connection
 	wsServer.clientMutex.Unlock()
 
 	var content []byte
@@ -177,7 +171,7 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 		wsServer.onConnect(connection)
 	}
 
-	return connection, nil
+	return clientID, nil
 }
 
 func (wsServer *wsserver) readFromConnection(connection net.Conn, readBuffer []byte) error {
@@ -199,20 +193,19 @@ func (wsServer *wsserver) readFromConnection(connection net.Conn, readBuffer []b
 
 	controlByte := readBuffer[0]
 	opCode := controlByte & 0b00001111
+
 	switch opCode {
-	case 0x8:
-		// close
+	case OP_CLOSE_CONN:
+		fmt.Println("got close request")
 		connection.Write([]byte{0x88, 0x02, 0x03, 0xE8})
 		return &WSServerError{message: "Connection closed"}
 
-	case 0x9:
-		// ping
+	case OP_PING:
 		fmt.Println("got a ping, sending a pong")
 		wsServer.pong(connection)
 		return nil
 
-	case 0xA:
-		// pong
+	case OP_PONG:
 		fmt.Println("got a pong")
 		return nil
 	}
@@ -233,16 +226,13 @@ func (wsServer *wsserver) readFromConnection(connection net.Conn, readBuffer []b
 		data = wsServer.readFrameData(connection, maskValue, readBuffer[6:], uint64(payloadLength))
 
 	case payloadLength == 126:
-		sizeBytes := []byte{readBuffer[2], readBuffer[3]}
+		sizeBytes := readBuffer[2:4]
 		maskValue := readBuffer[4:8]
 		payloadLength16 := binary.BigEndian.Uint16(sizeBytes)
 		data = wsServer.readFrameData(connection, maskValue, readBuffer[8:], uint64(payloadLength16))
 
 	case payloadLength == 127:
-		sizeBytes := []byte{
-			readBuffer[2], readBuffer[3], readBuffer[4], readBuffer[5],
-			readBuffer[6], readBuffer[7], readBuffer[8], readBuffer[9],
-		}
+		sizeBytes := readBuffer[2:10]
 		maskValue := readBuffer[10:14]
 		payloadLength64 := binary.BigEndian.Uint64(sizeBytes)
 		data = wsServer.readFrameData(connection, maskValue, readBuffer[14:], uint64(payloadLength64))
@@ -286,15 +276,31 @@ func (wsServer *wsserver) readFrameData(connection net.Conn, mask []byte, readBu
 	return data
 }
 
-func (wsServer *wsserver) SendText(connection net.Conn, data []byte) {
-	wsServer.send(connection, data, false)
+func (wsServer *wsserver) SendText(clientID string, data []byte) error {
+	controlByte := FINAL_FRAGMENT | OP_TEXT_FRAME
+
+	wsServer.clientMutex.Lock()
+	connection := wsServer.clients[clientID]
+	wsServer.clientMutex.Unlock()
+
+	return wsServer.send(connection, controlByte, data)
 }
 
-func (wsServer *wsserver) SendBinary(connection net.Conn, data []byte) {
-	wsServer.send(connection, data, true)
+func (wsServer *wsserver) SendBinary(clientID string, data []byte) error {
+	controlByte := FINAL_FRAGMENT | OP_BINARY_FRAME
+
+	wsServer.clientMutex.Lock()
+	connection := wsServer.clients[clientID]
+	wsServer.clientMutex.Unlock()
+
+	return wsServer.send(connection, controlByte, data)
 }
 
-func (wsServer *wsserver) send(connection net.Conn, data []byte, isBinary bool) {
+func (wsServer *wsserver) send(connection net.Conn, controlByte byte, data []byte) error {
+	if connection == nil {
+		return &WSServerError{message: "Client connection is nil"}
+	}
+
 	payloadLength := len(data)
 	frameLength := payloadLength + 2
 
@@ -306,45 +312,46 @@ func (wsServer *wsserver) send(connection net.Conn, data []byte, isBinary bool) 
 		frameLength += 2
 	}
 
-	responsePayload := make([]byte, 0, frameLength)
-
-	controlByte := 0x81
-	if isBinary {
-		controlByte += 0x01
-	}
-	responsePayload = append(responsePayload, byte(controlByte))
+	payload := make([]byte, 0, frameLength)
+	payload = append(payload, controlByte)
 
 	if payloadLength <= 125 {
-		responsePayload = append(responsePayload, byte(payloadLength))
+		payload = append(payload, byte(payloadLength))
 	} else if payloadLength <= (1 << 16) {
-		responsePayload = append(responsePayload, 0x7E)
-		responsePayload = binary.BigEndian.AppendUint16(responsePayload, uint16(payloadLength))
+		payload = append(payload, 0x7E)
+		payload = binary.BigEndian.AppendUint16(payload, uint16(payloadLength))
 	} else if payloadLength > (1 << 16) {
-		responsePayload = append(responsePayload, 0x7F)
-		responsePayload = binary.BigEndian.AppendUint64(responsePayload, uint64(payloadLength))
+		payload = append(payload, 0x7F)
+		payload = binary.BigEndian.AppendUint64(payload, uint64(payloadLength))
 	}
 
-	responsePayload = append(responsePayload, data...)
-	n, err := connection.Write(responsePayload)
-	if n != len(responsePayload) || err != nil {
-		fmt.Println(err)
+	payload = append(payload, data...)
+	n, err := connection.Write(payload)
+	if n != len(payload) || err != nil {
+		return &WSServerError{message: "Failed to write to connection"}
 	}
+
+	return nil
 }
 
 func (wsServer *wsserver) BroadcastText(data []byte) {
-	wsServer.broadcast(data, false)
+	controlByte := FINAL_FRAGMENT | OP_TEXT_FRAME
+	wsServer.broadcast(controlByte, data)
 }
 
 func (wsServer *wsserver) BroadcastBinary(data []byte) {
-	wsServer.broadcast(data, true)
+	controlByte := FINAL_FRAGMENT | OP_BINARY_FRAME
+	wsServer.broadcast(controlByte, data)
 }
 
-func (wsServer *wsserver) broadcast(data []byte, isBinary bool) {
+func (wsServer *wsserver) broadcast(controlByte byte, data []byte) {
 	wsServer.clientMutex.Lock()
 	defer wsServer.clientMutex.Unlock()
 
 	for _, client := range wsServer.clients {
-		wsServer.send(client, data, isBinary)
+		if err := wsServer.send(client, controlByte, data); err != nil {
+			fmt.Println("Failed to broadcast to client")
+		}
 	}
 }
 
@@ -354,35 +361,34 @@ func (wsServer *wsserver) Shutdown(ctx context.Context) error {
 	}
 
 	wsServer.active.Store(false)
-	shutdownErr := make(chan error, 1)
-	wsServer.Close(shutdownErr)
-	wsServer.server.Close()
-	return nil
-}
+	shutdownErr := make(chan error, len(wsServer.clients))
 
-func (wsServer *wsserver) Close(shutdownErr chan<- error) {
-	fmt.Println("Attempting graceful shutdown")
 	wsServer.clientMutex.Lock()
 	defer wsServer.clientMutex.Unlock()
 
 	for _, client := range wsServer.clients {
 		shutdownErr <- wsServer.closeClient(client)
 	}
+
+	wsServer.server.Close()
+
+	return nil
 }
 
 func (wsServer *wsserver) closeClient(client net.Conn) error {
 	// force normal read goroutine to exit
+	fmt.Println("closing client")
 	client.SetReadDeadline(time.Now())
 
-	payload := []byte("Server closed connection")
-	payloadSize := len(payload) + 2
+	controlByte := FINAL_FRAGMENT | OP_CLOSE_CONN
 
-	data := make([]byte, 0)
-	data = append(data, 0x88)
-	data = append(data, byte(payloadSize))
-	data = append(data, []byte{0x03, 0xE8}...) // 1000 - Normal Closure
-	data = append(data, payload...)
-	client.Write(data)
+	closeMessage := "Server closed connection"
+
+	payload := make([]byte, len(closeMessage)+2)
+	binary.BigEndian.PutUint16(payload, uint16(CLOSE_STATUS_NORMAL))
+	copy(payload[2:], []byte(closeMessage))
+
+	wsServer.send(client, controlByte, payload)
 
 	// wait for client close confirmation
 	closeBuf := make([]byte, 2)
@@ -392,7 +398,7 @@ func (wsServer *wsserver) closeClient(client net.Conn) error {
 		return &WSServerError{message: "Error closing client"}
 	}
 
-	if closeBuf[0] != 0x88 {
+	if closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
 		fmt.Printf("Error: expected close response, got: %x\n", closeBuf)
 		fmt.Println("Closing connection anyway")
 	}
@@ -405,11 +411,19 @@ func (wsServer *wsserver) closeClient(client net.Conn) error {
 }
 
 func (wsServer *wsserver) Ping() {
+	wsServer.clientMutex.Lock()
 	for _, client := range wsServer.clients {
-		client.Write([]byte{0x89, 0x00})
+		client.Write([]byte{FINAL_FRAGMENT | OP_PING, 0x00})
 	}
+	wsServer.clientMutex.Unlock()
 }
 
 func (wsServer *wsserver) pong(connection net.Conn) {
-	connection.Write([]byte{0x8A, 0x00})
+	connection.Write([]byte{FINAL_FRAGMENT | OP_PONG, 0x00})
+}
+
+func generateClientID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }

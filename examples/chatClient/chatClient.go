@@ -41,16 +41,9 @@ func main() {
 		clientError <- client.Start(context.Background())
 	}()
 
-	fmt.Println("Server starting")
-	for {
-		select {
-		case <-quit:
-			client.Close()
-			return
-		case <-clientError:
-			client.Close()
-			return
-		default:
+	messages := make(chan string)
+	go func() {
+		for {
 			message, err := reader.ReadString('\n')
 			if err != nil {
 				fmt.Println("Read error")
@@ -60,12 +53,26 @@ func main() {
 			fmt.Print("\u001b[1A\u001b[2K")
 			message = strings.ReplaceAll(message, "\n", "")
 
-			if message == ":quit" {
+			messages <- message
+		}
+	}()
+
+	fmt.Println("Server starting")
+
+	for {
+		select {
+		case <-quit:
+			client.Close()
+			return
+		case <-clientError:
+			return
+		case msg := <-messages:
+			if msg == ":quit" {
 				client.Close()
 				return
 			}
 
-			client.SendText([]byte("[" + name + "] " + message))
+			client.SendText([]byte("[" + name + "] " + msg))
 		}
 	}
 }

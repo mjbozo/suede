@@ -26,6 +26,7 @@ func main() {
 	})
 
 	server.OnMessage(func(client net.Conn, data []byte) {
+		fmt.Println(string(data))
 		server.BroadcastText(data)
 	})
 

@@ -29,7 +29,6 @@ type wsclient struct {
 	onDisconnect func()
 	onMessage    func([]byte)
 	connection   net.Conn
-	errCh        chan error
 	active       atomic.Bool
 }
 
@@ -49,8 +48,6 @@ func WebSocket(rawURL string) (*wsclient, error) {
 		path: urlObject.Path,
 	}
 
-	wsClient.active.Store(true)
-
 	return wsClient, nil
 }
 
@@ -67,7 +64,7 @@ func (wsClient *wsclient) OnMessage(messageCallback func([]byte)) {
 }
 
 // Start initiates the WebSocket handshake with a WebSocket server. Once connected successfully
-// a new goroutine will be created which will read from the connection continuously, and return
+// a new goroutine will be created which will read from the connection continuously
 func (wsClient *wsclient) Start(ctx context.Context) error {
 	connectionErr := wsClient.handleConnection()
 	if connectionErr != nil {
@@ -78,18 +75,24 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 		wsClient.onConnect()
 	}
 
+	clientErrors := make(chan error)
 	readBuffer := make([]byte, 256)
 	go func() {
-		wsClient.errCh <- wsClient.readFromConnection(readBuffer)
+		clientErrors <- wsClient.readFromConnection(readBuffer)
 	}()
+
+	wsClient.active.Store(true)
 
 	select {
 	case <-ctx.Done():
 		// graceful shutdown
 		fmt.Println("Client context done")
-	case <-wsClient.errCh:
+
+	case e := <-clientErrors:
 		// error occured
 		fmt.Println("Client error channel triggered")
+		fmt.Println(e)
+		return e
 	}
 
 	closeErr := wsClient.Close()
@@ -104,42 +107,9 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 	return nil
 }
 
-func (wsClient *wsclient) Close() error {
-	if !wsClient.active.Load() {
-		return nil
-	}
-
-	wsClient.active.Store(false)
-	wsClient.connection.SetReadDeadline(time.Now())
-
-	payload := []byte("Client closed connection")
-	payloadSize := len(payload) + 2
-
-	data := make([]byte, 0)
-	data = append(data, 0x88)
-	data = append(data, byte(payloadSize))
-	data = append(data, []byte{0x03, 0xE8}...) // 1000 - Normal Closure
-	data = append(data, payload...)
-	wsClient.connection.Write(data)
-
-	// wait for client close confirmation
-	closeBuf := make([]byte, 2)
-	wsClient.connection.SetDeadline(time.Now().Add(5 * time.Second))
-	n, err := wsClient.connection.Read(closeBuf)
-	if n != len(closeBuf) || err != nil {
-		return &WSServerError{message: "Error closing connection safely"}
-	}
-
-	if closeBuf[0] != 0x88 {
-		fmt.Printf("Error: expected close response, got: %x\n", closeBuf)
-		fmt.Println("Closing connection anyway")
-	}
-
-	if err = wsClient.connection.Close(); err != nil {
-		return err
-	}
-
-	return nil
+func (wsClient *wsclient) IsActive() bool {
+	active := wsClient.active.Load()
+	return active
 }
 
 func (wsClient *wsclient) handleConnection() error {
@@ -223,21 +193,20 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 
 		controlByte := readBuffer[0]
 		opCode := controlByte & 0b00001111
+
 		switch opCode {
-		case 0x8:
-			// close
-			fmt.Println("Got close request")
+		case OP_CLOSE_CONN:
+			code := binary.BigEndian.Uint16(readBuffer[2:4])
+			fmt.Printf("Close code: %d\n", code)
 			wsClient.connection.Write([]byte{0x88, 0x02, 0x03, 0xE8})
 			return &WSClientError{message: "Connection closed"}
 
-		case 0x9:
-			// ping
+		case OP_PING:
 			fmt.Println("got a ping, sending pong")
 			wsClient.pong(wsClient.connection)
 			continue
 
-		case 0xA:
-			// pong
+		case OP_PONG:
 			fmt.Println("got a pong")
 			continue
 		}
@@ -257,15 +226,12 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 			data = wsClient.readFrameData(readBuffer[2:], uint64(payloadLength))
 
 		case payloadLength == 126:
-			sizeBytes := []byte{readBuffer[2], readBuffer[3]}
+			sizeBytes := readBuffer[2:4]
 			payloadLength16 := binary.BigEndian.Uint16(sizeBytes)
 			data = wsClient.readFrameData(readBuffer[4:], uint64(payloadLength16))
 
 		case payloadLength == 127:
-			sizeBytes := []byte{
-				readBuffer[2], readBuffer[3], readBuffer[4], readBuffer[5],
-				readBuffer[6], readBuffer[7], readBuffer[8], readBuffer[9],
-			}
+			sizeBytes := readBuffer[2:10]
 			payloadLength64 := binary.BigEndian.Uint64(sizeBytes)
 			data = wsClient.readFrameData(readBuffer[10:], uint64(payloadLength64))
 		}
@@ -305,15 +271,17 @@ func (wsClient *wsclient) readFrameData(readBuffer []byte, length uint64) []byte
 }
 
 func (wsClient *wsclient) SendText(data []byte) {
-	wsClient.send(data, false)
+	controlByte := FINAL_FRAGMENT | OP_TEXT_FRAME
+	wsClient.send(controlByte, data)
 }
 
 func (wsClient *wsclient) SendBinary(data []byte) {
-	wsClient.send(data, true)
+	controlByte := FINAL_FRAGMENT | OP_BINARY_FRAME
+	wsClient.send(controlByte, data)
 }
 
 // Sends bytes to connected WebSocket server
-func (wsClient *wsclient) send(data []byte, isBinary bool) {
+func (wsClient *wsclient) send(controlByte byte, data []byte) {
 	mask := make([]byte, 4)
 	rand.Read(mask)
 
@@ -335,11 +303,7 @@ func (wsClient *wsclient) send(data []byte, isBinary bool) {
 	}
 
 	frame := make([]byte, 0, frameLength)
-	controlByte := 0x81
-	if isBinary {
-		controlByte += 0x01
-	}
-	frame = append(frame, byte(controlByte))
+	frame = append(frame, controlByte)
 
 	if payloadLength <= 125 {
 		frame = append(frame, 0b10000000|byte(len(maskedData)))
@@ -360,11 +324,48 @@ func (wsClient *wsclient) send(data []byte, isBinary bool) {
 	}
 }
 
+func (wsClient *wsclient) Close() error {
+	if !wsClient.active.Load() {
+		return nil
+	}
+
+	wsClient.active.Store(false)
+	wsClient.connection.SetReadDeadline(time.Now())
+
+	controlByte := FINAL_FRAGMENT | OP_CLOSE_CONN
+
+	closeMessage := []byte("Client closed connection")
+	payload := make([]byte, len(closeMessage)+2)
+	binary.BigEndian.PutUint16(payload, uint16(CLOSE_STATUS_NORMAL))
+	copy(payload[2:], closeMessage)
+
+	wsClient.send(controlByte, payload)
+
+	// wait for client close confirmation
+	closeBuf := make([]byte, 2)
+	wsClient.connection.SetDeadline(time.Now().Add(5 * time.Second))
+	n, err := wsClient.connection.Read(closeBuf)
+	if n != len(closeBuf) || err != nil {
+		return &WSServerError{message: "Error closing connection safely"}
+	}
+
+	if closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
+		fmt.Printf("Error: expected close response, got: %x\n", closeBuf)
+		fmt.Println("Closing connection anyway")
+	}
+
+	if err = wsClient.connection.Close(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (wsClient *wsclient) Ping() {
-	wsClient.connection.Write([]byte{0x89, 0x80})
+	wsClient.connection.Write([]byte{FINAL_FRAGMENT | OP_PING, 0x00})
 }
 
 func (wsClient *wsclient) pong(connection net.Conn) {
-	pongPayload := []byte{0x8A, 0x00}
+	pongPayload := []byte{FINAL_FRAGMENT | OP_PONG, 0x00}
 	connection.Write(pongPayload)
 }
