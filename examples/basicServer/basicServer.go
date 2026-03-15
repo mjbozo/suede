@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 
 	"github.com/mjbozo/suede"
 )
@@ -14,15 +13,15 @@ func main() {
 		panic("Could not create WebSocket server")
 	}
 
-	wsServer.OnConnect(func(client net.Conn) {
+	wsServer.OnConnect(func(client *suede.ClientConnection) {
 		fmt.Println("Client connected")
 	})
 
-	wsServer.OnDisconnect(func(client net.Conn) {
+	wsServer.OnDisconnect(func(client *suede.ClientConnection) {
 		fmt.Println("Client disconnected")
 	})
 
-	wsServer.OnMessage(func(client net.Conn, data []byte) {
+	wsServer.OnMessage(func(client *suede.ClientConnection, data []byte) {
 		fmt.Printf("Message = %s\n", data)
 		wsServer.BroadcastText([]byte("broadcasting..."))
 	})

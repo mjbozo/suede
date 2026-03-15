@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,16 +16,15 @@ func main() {
 		panic("could not start server")
 	}
 
-	server.OnConnect(func(client net.Conn) {
+	server.OnConnect(func(client *suede.ClientConnection) {
 		server.BroadcastText([]byte("New user joined the chat!"))
 	})
 
-	server.OnDisconnect(func(client net.Conn) {
+	server.OnDisconnect(func(client *suede.ClientConnection) {
 		server.BroadcastText([]byte("User has left the chat"))
 	})
 
-	server.OnMessage(func(client net.Conn, data []byte) {
-		fmt.Println(string(data))
+	server.OnMessage(func(client *suede.ClientConnection, data []byte) {
 		server.BroadcastText(data)
 	})
 

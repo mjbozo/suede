@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -78,7 +79,7 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 	}
 
 	clientErrors := make(chan error)
-	readBuffer := make([]byte, 256)
+	readBuffer := make([]byte, 2)
 	go func() {
 		clientErrors <- wsClient.readFromConnection(readBuffer)
 	}()
@@ -92,9 +93,7 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 
 	case e := <-clientErrors:
 		// error occured
-		debug.Println("Client error channel triggered")
-		debug.Println(e)
-		return e
+		debug.Printf("Client error channel triggered: %s\n", e)
 	}
 
 	closeErr := wsClient.Close()
@@ -139,15 +138,25 @@ func (wsClient *wsclient) handleConnection() error {
 	content = append(content, "\r\n\r\n"...)
 	conn.Write(content)
 
-	ackBuffer := make([]byte, 256)
-	_, readErr := conn.Read(ackBuffer)
-	if readErr != nil {
-		debug.Println(readErr.Error())
-		conn.Close()
-		return readErr
+	ackBuffer := make([]byte, 1)
+	ackPayload := make([]byte, 0)
+
+	for {
+		_, readErr := conn.Read(ackBuffer)
+		if readErr != nil {
+			debug.Println(readErr.Error())
+			conn.Close()
+			return readErr
+		}
+
+		ackPayload = append(ackPayload, ackBuffer...)
+		ackLength := len(ackPayload)
+		if ackLength >= 4 && slices.Equal(ackPayload[ackLength-4:], []byte{'\r', '\n', '\r', '\n'}) {
+			break
+		}
 	}
 
-	responseReader := bytes.NewBuffer(ackBuffer)
+	responseReader := bytes.NewBuffer(ackPayload)
 	for {
 		line, readStrError := responseReader.ReadString('\n')
 		if readStrError != nil {
@@ -188,8 +197,8 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 			return &WSClientError{message: "Read error occurred"}
 		}
 
-		if bytesRead < 2 {
-			debug.Println("Not enough bytes for a frame")
+		if bytesRead != 2 {
+			debug.Println("Invalid frame count")
 			return nil
 		}
 
@@ -198,14 +207,19 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 
 		switch opCode {
 		case OP_CLOSE_CONN:
-			code := binary.BigEndian.Uint16(readBuffer[2:4])
+			codeBuffer := make([]byte, 2)
+			wsClient.connection.Read(codeBuffer)
+			code := binary.BigEndian.Uint16(codeBuffer)
 			debug.Printf("Close code: %d\n", code)
-			wsClient.connection.Write([]byte{0x88, 0x02, 0x03, 0xE8})
+			closeData := make([]byte, 2)
+			binary.BigEndian.PutUint16(closeData, uint16(CLOSE_STATUS_NORMAL))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, closeData)
+			wsClient.active.Store(false)
 			return &WSClientError{message: "Connection closed"}
 
 		case OP_PING:
 			debug.Println("got a ping, sending pong")
-			wsClient.pong(wsClient.connection)
+			wsClient.pong()
 			continue
 
 		case OP_PONG:
@@ -222,20 +236,32 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 
 		payloadLength := payloadInfoByte & 0b01111111
 
-		data := make([]byte, payloadLength)
+		var data []byte
 		switch {
 		case payloadLength < 126:
-			data = wsClient.readFrameData(readBuffer[2:], uint64(payloadLength))
+			data = wsClient.readFrameData(uint64(payloadLength))
 
 		case payloadLength == 126:
-			sizeBytes := readBuffer[2:4]
-			payloadLength16 := binary.BigEndian.Uint16(sizeBytes)
-			data = wsClient.readFrameData(readBuffer[4:], uint64(payloadLength16))
+			headerSize := 2
+			frameBuffer := make([]byte, headerSize)
+			bytesRead, err := wsClient.connection.Read(frameBuffer)
+			if bytesRead != headerSize || err != nil {
+				debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
+				return nil
+			}
+			payloadLength16 := binary.BigEndian.Uint16(frameBuffer)
+			data = wsClient.readFrameData(uint64(payloadLength16))
 
 		case payloadLength == 127:
-			sizeBytes := readBuffer[2:10]
-			payloadLength64 := binary.BigEndian.Uint64(sizeBytes)
-			data = wsClient.readFrameData(readBuffer[10:], uint64(payloadLength64))
+			headerSize := 8
+			frameBuffer := make([]byte, headerSize)
+			bytesRead, err := wsClient.connection.Read(frameBuffer)
+			if bytesRead != headerSize || err != nil {
+				debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
+				return nil
+			}
+			payloadLength64 := binary.BigEndian.Uint64(frameBuffer)
+			data = wsClient.readFrameData(uint64(payloadLength64))
 		}
 
 		if wsClient.onMessage != nil {
@@ -244,32 +270,16 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 	}
 }
 
-func (wsClient *wsclient) readFrameData(readBuffer []byte, length uint64) []byte {
-	data := make([]byte, 0, length)
-	for i := 0; i < len(readBuffer); i++ {
-		data = append(data, readBuffer[i])
-		if uint64(len(data)) == length {
-			break
-		}
+func (wsClient *wsclient) readFrameData(length uint64) []byte {
+	readBuffer := make([]byte, length)
+
+	bytesRead, err := wsClient.connection.Read(readBuffer)
+	if bytesRead != int(length) || err != nil {
+		debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, length, err)
+		return nil
 	}
 
-	if length <= uint64(len(data)) {
-		return data
-	}
-
-	bytesRemaining := length - uint64(len(data))
-	frameBuffer := make([]byte, bytesRemaining)
-	bytesRead, err := wsClient.connection.Read(frameBuffer)
-	if err != nil {
-		debug.Println("Continutation read err")
-		debug.Println(err.Error())
-	}
-
-	for i := 0; i < bytesRead; i++ {
-		data = append(data, frameBuffer[i])
-	}
-
-	return data
+	return readBuffer
 }
 
 func (wsClient *wsclient) SendText(data []byte) {
@@ -284,24 +294,23 @@ func (wsClient *wsclient) SendBinary(data []byte) {
 
 // Sends bytes to connected WebSocket server
 func (wsClient *wsclient) send(controlByte byte, data []byte) {
-	mask := make([]byte, 4)
-	rand.Read(mask)
+	mask := generateMaskKey()
 
 	maskedData := make([]byte, 0, len(data))
-	for i := 0; i < len(data); i++ {
+	for i := range data {
 		maskedByte := data[i] ^ mask[i%4]
 		maskedData = append(maskedData, maskedByte)
 	}
 
 	payloadLength := len(maskedData)
-	frameLength := payloadLength + 2
+	frameLength := payloadLength + 6 // +2 for control byte and payload byte, +4 for mask bytes
 
 	if payloadLength > 125 {
-		frameLength += 2
+		frameLength += 2 // extra 2 payload length bytes
 	}
 
 	if payloadLength > (1 << 16) {
-		frameLength += 2
+		frameLength += 4 // another extra 4 payload length bytes
 	}
 
 	frame := make([]byte, 0, frameLength)
@@ -343,12 +352,13 @@ func (wsClient *wsclient) Close() error {
 
 	wsClient.send(controlByte, payload)
 
-	// wait for client close confirmation
+	// wait for server close confirmation
 	closeBuf := make([]byte, 2)
-	wsClient.connection.SetDeadline(time.Now().Add(5 * time.Second))
+	wsClient.connection.SetReadDeadline(time.Now().Add(5 * time.Second))
 	n, err := wsClient.connection.Read(closeBuf)
 	if n != len(closeBuf) || err != nil {
-		return &WSServerError{message: "Error closing connection safely"}
+		debug.Printf("Error closing connection safely. %d/%d bytes read. Error: %s\n", n, len(closeBuf), err)
+		// return &WSServerError{message: msg}
 	}
 
 	if closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
@@ -364,10 +374,19 @@ func (wsClient *wsclient) Close() error {
 }
 
 func (wsClient *wsclient) Ping() {
-	wsClient.connection.Write([]byte{FINAL_FRAGMENT | OP_PING, 0x00})
+	controlByte := FINAL_FRAGMENT | OP_PING
+	wsClient.send(controlByte, nil)
 }
 
-func (wsClient *wsclient) pong(connection net.Conn) {
-	pongPayload := []byte{FINAL_FRAGMENT | OP_PONG, 0x00}
-	connection.Write(pongPayload)
+func (wsClient *wsclient) pong() {
+	// TODO: Read payload size in case application data passed with ping
+	// Application data must be sent back to the server
+	controlByte := FINAL_FRAGMENT | OP_PONG
+	wsClient.send(controlByte, nil)
+}
+
+func generateMaskKey() []byte {
+	mask := make([]byte, 4)
+	rand.Read(mask)
+	return mask
 }
