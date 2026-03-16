@@ -162,7 +162,7 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 		return "", &WSServerError{message: "Empty Sec-WebSocket-Key header value"}
 	}
 
-	wsAccept := GenerateWSAccept(wsKey)
+	wsAccept := generateWSAccept(wsKey)
 	hijacker, ok := res.(http.Hijacker)
 	if !ok {
 		return "", &WSServerError{message: "ResponseWriter is not a http.Hijacker"}
@@ -173,9 +173,6 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 		return "", &WSServerError{message: "Failed to hijack the connection"}
 	}
 
-	clientID := generateClientID()
-	// debug.Printf("Connecting client with ID: %s\n", clientID)
-
 	var content []byte
 	content = append(content, "HTTP/1.1 101 Switching Protocols\r\n"...)
 	content = append(content, "Upgrade: websocket\r\n"...)
@@ -183,15 +180,16 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 	content = append(content, fmt.Sprintf("Sec-WebSocket-Accept: %s", wsAccept)...)
 	content = append(content, "\r\n\r\n"...)
 	bytesWritten, err := hijackedConnection.Write(content)
-	// debug.Printf("Bytes written when acking handshake: %d\n", bytesWritten)
 
 	if bytesWritten != len(content) || err != nil {
 		debug.Printf("Failed to write to hijacked connection. Wrote %d/%d bytes. Error: %s\n", bytesWritten, len(content), err)
 		return "", &WSServerError{"Failed to write to hijacked connection"}
 	}
 
-	wsServer.clientsMutex.Lock()
+	clientID := generateClientID()
 	clientConnection := &ClientConnection{id: clientID, connection: hijackedConnection, closeSignal: make(chan *struct{})}
+
+	wsServer.clientsMutex.Lock()
 	wsServer.clients[clientID] = clientConnection
 	wsServer.clientsMutex.Unlock()
 
@@ -224,28 +222,6 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	controlByte := readBuffer[0]
 	opCode := controlByte & 0b00001111
 
-	switch opCode {
-	case OP_CLOSE_CONN:
-		debug.Println("got close request")
-		closeData := make([]byte, 2)
-		binary.BigEndian.PutUint16(closeData, uint16(CLOSE_STATUS_NORMAL))
-		wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, closeData)
-		return &WSServerError{message: "Connection closed"}
-
-	case OP_PING:
-		debug.Println("got a ping, sending a pong")
-		maskBuffer := make([]byte, 4)
-		connection.Read(maskBuffer)
-		wsServer.pong(clientConnection)
-		return nil
-
-	case OP_PONG:
-		debug.Printf("got a pong: %v\n", readBuffer)
-		maskBuffer := make([]byte, 4)
-		connection.Read(maskBuffer)
-		return nil
-	}
-
 	payloadInfoByte := readBuffer[1]
 	mask := payloadInfoByte & 0b10000000
 	if mask == 0 {
@@ -255,6 +231,52 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 	payloadLength := payloadInfoByte & 0b01111111
 
+	switch opCode {
+	case OP_TEXT_FRAME, OP_BINARY_FRAME:
+		data := wsServer.parseFrame(connection, payloadLength)
+		if wsServer.onMessage != nil {
+			wsServer.onMessage(clientConnection, data)
+		}
+
+	case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:
+		// reserved non-control opcodes - unsupported, close connection
+		debug.Println("received reserved non-control opcode, closing connection")
+		clientConnection.closeSignal <- nil
+		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
+		wsServer.closeClient(clientConnection, CLOSE_STATUS_ERROR, closeMessage)
+		return &WSServerError{message: "Received reserved non-control opcode: Connection closed"}
+
+	case OP_CLOSE_CONN:
+		debug.Println("got close request")
+		closeData := make([]byte, 2)
+		binary.BigEndian.PutUint16(closeData, uint16(CLOSE_STATUS_NORMAL))
+		wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, closeData)
+		return &WSServerError{message: "Connection closed"}
+
+	case OP_PING:
+		debug.Println("got a ping, sending a pong")
+		wsServer.pong(clientConnection, payloadLength)
+		return nil
+
+	case OP_PONG:
+		debug.Printf("got a pong: %v\n", readBuffer)
+		maskBuffer := make([]byte, 4)
+		connection.Read(maskBuffer)
+		return nil
+
+	case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
+		// reserved control opcodes - unsupported, close connection
+		debug.Println("received reserved control opcode, closing connection")
+		clientConnection.closeSignal <- nil
+		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
+		wsServer.closeClient(clientConnection, CLOSE_STATUS_ERROR, closeMessage)
+		return &WSServerError{message: "Received reserved control opcode: Connection closed"}
+	}
+
+	return nil
+}
+
+func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []byte {
 	var data []byte
 	switch {
 	case payloadLength < 126:
@@ -294,11 +316,7 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 		data = wsServer.readFrameData(connection, mask, uint64(payloadLength64))
 	}
 
-	if wsServer.onMessage != nil {
-		wsServer.onMessage(clientConnection, data)
-	}
-
-	return nil
+	return data
 }
 
 func (wsServer *wsserver) readFrameData(connection net.Conn, mask []byte, length uint64) []byte {
@@ -429,7 +447,7 @@ func (wsServer *wsserver) Shutdown(ctx context.Context) error {
 	defer wsServer.clientsMutex.Unlock()
 
 	for _, client := range wsServer.clients {
-		shutdownErr <- wsServer.closeClient(client)
+		shutdownErr <- wsServer.closeClient(client, CLOSE_STATUS_NORMAL, "Server closed connection")
 	}
 
 	wsServer.server.Close()
@@ -437,23 +455,25 @@ func (wsServer *wsserver) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (wsServer *wsserver) closeClient(clientConnection *ClientConnection) error {
+func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeStatus uint, closeMessage string) error {
 	// force normal read goroutine to exit
 	debug.Println("closing client")
 	clientConnection.connection.SetReadDeadline(time.Now())
+
+	// TODO: Maybe wrap this in a timeout context in case there is some deadlock which I don't think can actually occur
 	<-clientConnection.closeSignal
 
 	controlByte := FINAL_FRAGMENT | OP_CLOSE_CONN
 
-	closeMessage := "Server closed connection"
-
 	payload := make([]byte, len(closeMessage)+2)
-	binary.BigEndian.PutUint16(payload, uint16(CLOSE_STATUS_NORMAL))
+	binary.BigEndian.PutUint16(payload, uint16(closeStatus))
 	copy(payload[2:], []byte(closeMessage))
 
 	wsServer.send(clientConnection, controlByte, payload)
 
 	// wait for client close confirmation
+	// TODO: Messages may already be in-transit; no guarantee next read frame will be reply to sent close frame
+	// Need to probably continue reading until close frame is received, or the timeout occurs
 	closeBuf := make([]byte, 2)
 	clientConnection.connection.SetDeadline(time.Now().Add(5 * time.Second))
 	n, err := clientConnection.connection.Read(closeBuf)
@@ -481,10 +501,11 @@ func (wsServer *wsserver) Ping() {
 	}
 }
 
-func (wsServer *wsserver) pong(client *ClientConnection) {
+func (wsServer *wsserver) pong(client *ClientConnection, payloadLength byte) {
 	// TODO: Read payload size in case application data passed with ping, and read mask key
 	// Application data must be sent back to the client
-	wsServer.send(client, FINAL_FRAGMENT|OP_PONG, nil)
+	pingData := wsServer.parseFrame(client.connection, payloadLength)
+	wsServer.send(client, FINAL_FRAGMENT|OP_PONG, pingData)
 }
 
 func (wsServer *wsserver) snapshotClients() []*ClientConnection {

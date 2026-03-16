@@ -1,22 +1,22 @@
 package suede
 
 import (
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"io"
-	"math/rand"
 )
 
 const WEB_SOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-func GenerateWSKey() string {
+func generateWSKey() string {
 	key := make([]byte, 16)
 	rand.Read(key)
 	encoded := base64.StdEncoding.EncodeToString(key)
 	return encoded
 }
 
-func GenerateWSAccept(key string) []byte {
+func generateWSAccept(key string) []byte {
 	hash := sha1.New()
 	io.WriteString(hash, key+WEB_SOCKET_GUID)
 	sha := hash.Sum(nil)

@@ -125,8 +125,8 @@ func (wsClient *wsclient) handleConnection() error {
 
 	wsClient.connection = conn
 
-	wsKey := GenerateWSKey()
-	wsAccept := GenerateWSAccept(wsKey)
+	wsKey := generateWSKey()
+	wsAccept := generateWSAccept(wsKey)
 
 	var content []byte
 	content = append(content, fmt.Sprintf("GET %s HTTP/1.1\r\n", wsClient.path)...)
@@ -353,6 +353,8 @@ func (wsClient *wsclient) Close() error {
 	wsClient.send(controlByte, payload)
 
 	// wait for server close confirmation
+	// TODO: Messages may already be in-transit; no guarantee next read frame will be reply to sent close frame
+	// Need to probably continue reading until close frame is received, or the timeout occurs
 	closeBuf := make([]byte, 2)
 	wsClient.connection.SetReadDeadline(time.Now().Add(5 * time.Second))
 	n, err := wsClient.connection.Read(closeBuf)
