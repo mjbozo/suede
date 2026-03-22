@@ -21,6 +21,7 @@ func main() {
 	})
 
 	server.OnDisconnect(func(client *suede.ClientConnection) {
+		fmt.Printf("Client %s disconnected\n", client.ID)
 		server.BroadcastText([]byte("User has left the chat"))
 	})
 

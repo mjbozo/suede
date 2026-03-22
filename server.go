@@ -28,7 +28,7 @@ func (err *WSServerError) Error() string {
 }
 
 type ClientConnection struct {
-	id          string
+	ID          string
 	connection  net.Conn
 	closeSignal chan *struct{}
 	mu          sync.Mutex
@@ -187,7 +187,7 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 	}
 
 	clientID := generateClientID()
-	clientConnection := &ClientConnection{id: clientID, connection: hijackedConnection, closeSignal: make(chan *struct{})}
+	clientConnection := &ClientConnection{ID: clientID, connection: hijackedConnection, closeSignal: make(chan *struct{})}
 
 	wsServer.clientsMutex.Lock()
 	wsServer.clients[clientID] = clientConnection
@@ -421,7 +421,7 @@ func (wsServer *wsserver) broadcast(controlByte byte, data []byte) {
 			defer wg.Done()
 			for client := range jobs {
 				if err := wsServer.send(client, controlByte, data); err != nil {
-					debug.Printf("Failed to broadcast to client %s: %s\nMessage attempted: %s / %v\n", client.id, err.Error(), string(data), data)
+					debug.Printf("Failed to broadcast to client %s: %s\nMessage attempted: %s / %v\n", client.ID, err.Error(), string(data), data)
 				}
 			}
 		}()

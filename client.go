@@ -103,7 +103,7 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 		}
 	}
 
-	closeErr := wsClient.Close()
+	closeErr := wsClient.handleClose(CLOSE_STATUS_NORMAL, "Client closed connection")
 	if closeErr != nil {
 		return closeErr
 	}
@@ -212,7 +212,30 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 		controlByte := readBuffer[0]
 		opCode := controlByte & 0b00001111
 
+		payloadInfoByte := readBuffer[1]
+		mask := payloadInfoByte & 0b10000000
+		if mask != 0 {
+			debug.Println("Server should not set mask bit")
+			return &WSClientError{message: "Server set mask bit"}
+		}
+
+		payloadLength := payloadInfoByte & 0b01111111
+
 		switch opCode {
+		case OP_TEXT_FRAME, OP_BINARY_FRAME:
+			data := wsClient.parseFrame(payloadLength)
+			if wsClient.onMessage != nil {
+				wsClient.onMessage(data)
+			}
+
+		case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:
+			// reserved non-control opcodes - unsupported, close connection
+			debug.Println("received reserved non-control opcode, closing connection")
+			wsClient.closeSignal <- nil
+			closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
+			wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
+			return &WSClientError{message: "Received reserved non-control opcode: Connection closed"}
+
 		case OP_CLOSE_CONN:
 			codeBuffer := make([]byte, 2)
 			wsClient.connection.Read(codeBuffer)
@@ -226,55 +249,54 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 
 		case OP_PING:
 			debug.Println("got a ping, sending pong")
-			wsClient.pong()
+			wsClient.pong(payloadLength)
 			continue
 
 		case OP_PONG:
 			debug.Println("got a pong")
 			continue
-		}
 
-		payloadInfoByte := readBuffer[1]
-		mask := payloadInfoByte & 0b10000000
-		if mask > 0 {
-			debug.Println("Server should not set mask bit")
-			return &WSClientError{message: "Server set mask bit"}
-		}
-
-		payloadLength := payloadInfoByte & 0b01111111
-
-		var data []byte
-		switch {
-		case payloadLength < 126:
-			data = wsClient.readFrameData(uint64(payloadLength))
-
-		case payloadLength == 126:
-			headerSize := 2
-			frameBuffer := make([]byte, headerSize)
-			bytesRead, err := wsClient.connection.Read(frameBuffer)
-			if bytesRead != headerSize || err != nil {
-				debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
-				return nil
-			}
-			payloadLength16 := binary.BigEndian.Uint16(frameBuffer)
-			data = wsClient.readFrameData(uint64(payloadLength16))
-
-		case payloadLength == 127:
-			headerSize := 8
-			frameBuffer := make([]byte, headerSize)
-			bytesRead, err := wsClient.connection.Read(frameBuffer)
-			if bytesRead != headerSize || err != nil {
-				debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
-				return nil
-			}
-			payloadLength64 := binary.BigEndian.Uint64(frameBuffer)
-			data = wsClient.readFrameData(uint64(payloadLength64))
-		}
-
-		if wsClient.onMessage != nil {
-			wsClient.onMessage(data)
+		case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
+			// reserved control opcodes - unsupported, close connection
+			debug.Println("received reserved control opcode, closing connection")
+			wsClient.closeSignal <- nil
+			closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
+			wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
+			return &WSServerError{message: "Received reserved control opcode: Connection closed"}
 		}
 	}
+}
+
+func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
+	var data []byte
+	switch {
+	case payloadLength < 126:
+		data = wsClient.readFrameData(uint64(payloadLength))
+
+	case payloadLength == 126:
+		headerSize := 2
+		frameBuffer := make([]byte, headerSize)
+		bytesRead, err := wsClient.connection.Read(frameBuffer)
+		if bytesRead != headerSize || err != nil {
+			debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
+			return nil
+		}
+		payloadLength16 := binary.BigEndian.Uint16(frameBuffer)
+		data = wsClient.readFrameData(uint64(payloadLength16))
+
+	case payloadLength == 127:
+		headerSize := 8
+		frameBuffer := make([]byte, headerSize)
+		bytesRead, err := wsClient.connection.Read(frameBuffer)
+		if bytesRead != headerSize || err != nil {
+			debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
+			return nil
+		}
+		payloadLength64 := binary.BigEndian.Uint64(frameBuffer)
+		data = wsClient.readFrameData(uint64(payloadLength64))
+	}
+
+	return data
 }
 
 func (wsClient *wsclient) readFrameData(length uint64) []byte {
@@ -343,6 +365,10 @@ func (wsClient *wsclient) send(controlByte byte, data []byte) {
 }
 
 func (wsClient *wsclient) Close() error {
+	return wsClient.handleClose(CLOSE_STATUS_NORMAL, "Client closed connection")
+}
+
+func (wsClient *wsclient) handleClose(closeStatus uint, closeMessage string) error {
 	if !wsClient.active.Load() {
 		return nil
 	}
@@ -362,9 +388,8 @@ func (wsClient *wsclient) Close() error {
 
 	controlByte := FINAL_FRAGMENT | OP_CLOSE_CONN
 
-	closeMessage := []byte("Client closed connection")
 	payload := make([]byte, len(closeMessage)+2)
-	binary.BigEndian.PutUint16(payload, uint16(CLOSE_STATUS_NORMAL))
+	binary.BigEndian.PutUint16(payload, uint16(closeStatus))
 	copy(payload[2:], closeMessage)
 
 	wsClient.send(controlByte, payload)
@@ -407,11 +432,10 @@ func (wsClient *wsclient) Ping() {
 	wsClient.send(controlByte, nil)
 }
 
-func (wsClient *wsclient) pong() {
-	// TODO: Read payload size in case application data passed with ping
-	// Application data must be sent back to the server
+func (wsClient *wsclient) pong(payloadLength byte) {
+	pingData := wsClient.parseFrame(payloadLength)
 	controlByte := FINAL_FRAGMENT | OP_PONG
-	wsClient.send(controlByte, nil)
+	wsClient.send(controlByte, pingData)
 }
 
 func generateMaskKey() []byte {
