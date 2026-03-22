@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -33,6 +35,7 @@ type wsclient struct {
 	onMessage    func([]byte)
 	connection   net.Conn
 	active       atomic.Bool
+	closeSignal  chan *struct{}
 }
 
 func WebSocket(rawURL string) (*wsclient, error) {
@@ -47,8 +50,9 @@ func WebSocket(rawURL string) (*wsclient, error) {
 	}
 
 	wsClient := &wsclient{
-		host: urlObject.Host,
-		path: urlObject.Path,
+		host:        urlObject.Host,
+		path:        urlObject.Path,
+		closeSignal: make(chan *struct{}),
 	}
 
 	return wsClient, nil
@@ -94,6 +98,9 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 	case e := <-clientErrors:
 		// error occured
 		debug.Printf("Client error channel triggered: %s\n", e)
+		if errors.Is(e, os.ErrDeadlineExceeded) && !wsClient.active.Load() {
+			wsClient.closeSignal <- nil
+		}
 	}
 
 	closeErr := wsClient.Close()
@@ -194,7 +201,7 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 		bytesRead, readErr := wsClient.connection.Read(readBuffer)
 		if readErr != nil {
 			debug.Printf("Read Error: %s\n", readErr.Error())
-			return &WSClientError{message: "Read error occurred"}
+			return readErr
 		}
 
 		if bytesRead != 2 {
@@ -343,6 +350,16 @@ func (wsClient *wsclient) Close() error {
 	wsClient.active.Store(false)
 	wsClient.connection.SetReadDeadline(time.Now())
 
+	closeSignalReceived := false
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer closeCancel()
+
+	select {
+	case <-wsClient.closeSignal:
+		closeSignalReceived = true
+	case <-closeCtx.Done():
+	}
+
 	controlByte := FINAL_FRAGMENT | OP_CLOSE_CONN
 
 	closeMessage := []byte("Client closed connection")
@@ -352,23 +369,33 @@ func (wsClient *wsclient) Close() error {
 
 	wsClient.send(controlByte, payload)
 
+	if !closeSignalReceived {
+		return &WSClientError{message: "Failed to wait on close signal. Close frame sent to server, but not waiting for response."}
+	}
+
 	// wait for server close confirmation
-	// TODO: Messages may already be in-transit; no guarantee next read frame will be reply to sent close frame
-	// Need to probably continue reading until close frame is received, or the timeout occurs
-	closeBuf := make([]byte, 2)
 	wsClient.connection.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := wsClient.connection.Read(closeBuf)
-	if n != len(closeBuf) || err != nil {
-		debug.Printf("Error closing connection safely. %d/%d bytes read. Error: %s\n", n, len(closeBuf), err)
-		// return &WSServerError{message: msg}
+	closeBuf := make([]byte, 2)
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer readCancel()
+
+	for closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN && readCtx.Err() == nil {
+		n, err := wsClient.connection.Read(closeBuf)
+		if !errors.Is(err, os.ErrDeadlineExceeded) && (n != len(closeBuf) || err != nil) {
+			debug.Printf("Error closing connection safely. %d/%d bytes read. Error: %s\n", n, len(closeBuf), err)
+			errMsg := fmt.Sprintf("Error reading close frame from server: %v", err)
+			return &WSClientError{message: errMsg}
+		}
+		// NOTE: potentially handle in-transit messages here. For now, they are effectively being dropped
 	}
 
 	if closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
-		debug.Printf("Error: expected close response, got: %x\n", closeBuf)
-		debug.Println("Closing connection anyway")
+		debug.Printf("Error: expected close response, but did not receive before timeout\nClosing connection anyway...\n")
 	}
+	// TODO: Potentially want to read rest of frame to log status code or any close message in an else block above
 
-	if err = wsClient.connection.Close(); err != nil {
+	if err := wsClient.connection.Close(); err != nil {
 		return err
 	}
 

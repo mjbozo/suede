@@ -455,13 +455,21 @@ func (wsServer *wsserver) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// TODO: TEST THIS FUNCTION I HAVE NO IDEA IF WHAT I'VE DONE IS CORRECT
 func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeStatus uint, closeMessage string) error {
 	// force normal read goroutine to exit
 	debug.Println("closing client")
 	clientConnection.connection.SetReadDeadline(time.Now())
 
-	// TODO: Maybe wrap this in a timeout context in case there is some deadlock which I don't think can actually occur
-	<-clientConnection.closeSignal
+	closeSignalReceived := false
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer closeCancel()
+
+	select {
+	case <-clientConnection.closeSignal:
+		closeSignalReceived = true
+	case <-closeCtx.Done():
+	}
 
 	controlByte := FINAL_FRAGMENT | OP_CLOSE_CONN
 
@@ -471,23 +479,32 @@ func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeS
 
 	wsServer.send(clientConnection, controlByte, payload)
 
-	// wait for client close confirmation
-	// TODO: Messages may already be in-transit; no guarantee next read frame will be reply to sent close frame
-	// Need to probably continue reading until close frame is received, or the timeout occurs
-	closeBuf := make([]byte, 2)
+	if !closeSignalReceived {
+		return &WSServerError{message: "Failed to wait on close signal. Close frame sent to client, but not waiting for response."}
+	}
+
+	// wait for client close confirmation, or timeout
 	clientConnection.connection.SetDeadline(time.Now().Add(5 * time.Second))
-	n, err := clientConnection.connection.Read(closeBuf)
-	if n != len(closeBuf) || err != nil {
-		return &WSServerError{message: "Error closing client"}
+	closeBuf := make([]byte, 2)
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer readCancel()
+
+	for closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN && readCtx.Err() == nil {
+		n, err := clientConnection.connection.Read(closeBuf)
+		if !errors.Is(err, os.ErrDeadlineExceeded) && (n != len(closeBuf) || err != nil) {
+			errMsg := fmt.Sprintf("Error reading close frame from client: %v", err)
+			return &WSServerError{message: errMsg}
+		}
+		// NOTE: potentially handle in-transit messages here. For now, they are effectively being dropped
 	}
 
 	if closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
-		debug.Printf("Error: expected close response, got: %x\nClosing connection anyway...\n", closeBuf)
+		debug.Printf("Error: expected close response, but did not receive before timeout\nClosing connection anyway...\n")
 	}
+	// TODO: Potentially want to read rest of frame to log status code or any close message in an else block above
 
-	// TODO: Potentially want to read rest of frame to log status code or any close message
-
-	if err = clientConnection.connection.Close(); err != nil {
+	if err := clientConnection.connection.Close(); err != nil {
 		return err
 	}
 
@@ -502,8 +519,6 @@ func (wsServer *wsserver) Ping() {
 }
 
 func (wsServer *wsserver) pong(client *ClientConnection, payloadLength byte) {
-	// TODO: Read payload size in case application data passed with ping, and read mask key
-	// Application data must be sent back to the client
 	pingData := wsServer.parseFrame(client.connection, payloadLength)
 	wsServer.send(client, FINAL_FRAGMENT|OP_PONG, pingData)
 }
