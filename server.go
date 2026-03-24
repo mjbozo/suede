@@ -30,6 +30,7 @@ func (err *WSServerError) Error() string {
 type ClientConnection struct {
 	ID          string
 	connection  net.Conn
+	fragments   []byte
 	closeSignal chan *struct{}
 	mu          sync.Mutex
 }
@@ -187,7 +188,12 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 	}
 
 	clientID := generateClientID()
-	clientConnection := &ClientConnection{ID: clientID, connection: hijackedConnection, closeSignal: make(chan *struct{})}
+	clientConnection := &ClientConnection{
+		ID:          clientID,
+		connection:  hijackedConnection,
+		fragments:   make([]byte, 0),
+		closeSignal: make(chan *struct{}),
+	}
 
 	wsServer.clientsMutex.Lock()
 	wsServer.clients[clientID] = clientConnection
@@ -232,10 +238,21 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	payloadLength := payloadInfoByte & 0b01111111
 
 	switch opCode {
-	case OP_TEXT_FRAME, OP_BINARY_FRAME:
+	case OP_CONTINUE_FRAME, OP_TEXT_FRAME, OP_BINARY_FRAME:
 		data := wsServer.parseFrame(connection, payloadLength)
-		if wsServer.onMessage != nil {
-			wsServer.onMessage(clientConnection, data)
+		fin := (controlByte & 0b10000000) != 0
+
+		if fin {
+			data = append(clientConnection.fragments, data...)
+			clientConnection.fragments = make([]byte, 0)
+
+			if wsServer.onMessage != nil {
+				wsServer.onMessage(clientConnection, data)
+			}
+		} else {
+			clientConnection.mu.Lock()
+			clientConnection.fragments = append(clientConnection.fragments, data...)
+			clientConnection.mu.Unlock()
 		}
 
 	case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:

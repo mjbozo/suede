@@ -197,6 +197,8 @@ func (wsClient *wsclient) handleConnection() error {
 }
 
 func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
+	fragments := make([]byte, 0)
+
 	for {
 		bytesRead, readErr := wsClient.connection.Read(readBuffer)
 		if readErr != nil {
@@ -222,10 +224,19 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 		payloadLength := payloadInfoByte & 0b01111111
 
 		switch opCode {
-		case OP_TEXT_FRAME, OP_BINARY_FRAME:
+		case OP_CONTINUE_FRAME, OP_TEXT_FRAME, OP_BINARY_FRAME:
 			data := wsClient.parseFrame(payloadLength)
-			if wsClient.onMessage != nil {
-				wsClient.onMessage(data)
+			fin := (controlByte & 0b10000000) != 0
+
+			if fin {
+				data = append(fragments, data...)
+				fragments = make([]byte, 0)
+
+				if wsClient.onMessage != nil {
+					wsClient.onMessage(data)
+				}
+			} else {
+				fragments = append(fragments, data...)
 			}
 
 		case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:
