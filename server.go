@@ -264,10 +264,15 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 		return &WSServerError{message: "Received reserved non-control opcode: Connection closed"}
 
 	case OP_CLOSE_CONN:
-		debug.Println("got close request")
-		closeData := make([]byte, 2)
-		binary.BigEndian.PutUint16(closeData, uint16(CLOSE_STATUS_NORMAL))
-		wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, closeData)
+		var responseCode []byte
+		if payloadLength != 0 {
+			data := wsServer.parseFrame(clientConnection.connection, payloadLength)
+			responseCode = data[0:2]
+			closeCode := binary.BigEndian.Uint16(responseCode)
+			debug.Printf("Close code: %d, Message: %s\n", closeCode, data[2:])
+		}
+
+		wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
 		return &WSServerError{message: "Connection closed"}
 
 	case OP_PING:
@@ -516,10 +521,17 @@ func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeS
 		// NOTE: potentially handle in-transit messages here. For now, they are effectively being dropped
 	}
 
-	if closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
+	if closeBuf[0] == FINAL_FRAGMENT|OP_CLOSE_CONN {
+		debug.Println("Received close response")
+		payloadLength := closeBuf[1] & 0b01111111
+		if payloadLength != 0 {
+			data := wsServer.parseFrame(clientConnection.connection, payloadLength)
+			closeCode := binary.BigEndian.Uint16(data)
+			debug.Printf("Returned close code: %d\n", closeCode)
+		}
+	} else {
 		debug.Printf("Error: expected close response, but did not receive before timeout\nClosing connection anyway...\n")
 	}
-	// TODO: Potentially want to read rest of frame to log status code or any close message in an else block above
 
 	if err := clientConnection.connection.Close(); err != nil {
 		return err
