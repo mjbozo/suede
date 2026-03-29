@@ -45,6 +45,11 @@ func WebSocket(rawURL string) (*wsclient, error) {
 		return nil, urlErr
 	}
 
+	if len(urlObject.Scheme) == 0 || len(urlObject.Host) == 0 {
+		debug.Printf("Invalid URL passed to websocket client creation. URL recieved: %s\n", rawURL)
+		return nil, &WSClientError{message: "Invalid URL: " + rawURL}
+	}
+
 	if urlObject.Path == "" {
 		urlObject.Path = "/"
 	}
