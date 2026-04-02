@@ -36,6 +36,8 @@ type wsclient struct {
 	connection   net.Conn
 	active       atomic.Bool
 	closeSignal  chan *struct{}
+	fragments    []byte
+	closeTimeout time.Duration
 }
 
 func WebSocket(rawURL string) (*wsclient, error) {
@@ -55,9 +57,11 @@ func WebSocket(rawURL string) (*wsclient, error) {
 	}
 
 	wsClient := &wsclient{
-		host:        urlObject.Host,
-		path:        urlObject.Path,
-		closeSignal: make(chan *struct{}),
+		host:         urlObject.Host,
+		path:         urlObject.Path,
+		closeSignal:  make(chan *struct{}),
+		fragments:    make([]byte, 0),
+		closeTimeout: 5 * time.Second,
 	}
 
 	return wsClient, nil
@@ -88,9 +92,14 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 	}
 
 	clientErrors := make(chan error)
-	readBuffer := make([]byte, 2)
 	go func() {
-		clientErrors <- wsClient.readFromConnection(readBuffer)
+		readBuffer := make([]byte, 2)
+		for {
+			clientErr := wsClient.readFromConnection(readBuffer)
+			if clientErr != nil {
+				clientErrors <- clientErr
+			}
+		}
 	}()
 
 	wsClient.active.Store(true)
@@ -202,87 +211,85 @@ func (wsClient *wsclient) handleConnection() error {
 }
 
 func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
-	fragments := make([]byte, 0)
-
-	for {
-		bytesRead, readErr := wsClient.connection.Read(readBuffer)
-		if readErr != nil {
-			debug.Printf("Read Error: %s\n", readErr.Error())
-			return readErr
-		}
-
-		if bytesRead != 2 {
-			debug.Println("Invalid frame count")
-			return nil
-		}
-
-		controlByte := readBuffer[0]
-		opCode := controlByte & 0b00001111
-
-		payloadInfoByte := readBuffer[1]
-		mask := payloadInfoByte & 0b10000000
-		if mask != 0 {
-			debug.Println("Server should not set mask bit")
-			return &WSClientError{message: "Server set mask bit"}
-		}
-
-		payloadLength := payloadInfoByte & 0b01111111
-
-		switch opCode {
-		case OP_CONTINUE_FRAME, OP_TEXT_FRAME, OP_BINARY_FRAME:
-			data := wsClient.parseFrame(payloadLength)
-			fin := (controlByte & 0b10000000) != 0
-
-			if fin {
-				data = append(fragments, data...)
-				fragments = make([]byte, 0)
-
-				if wsClient.onMessage != nil {
-					wsClient.onMessage(data)
-				}
-			} else {
-				fragments = append(fragments, data...)
-			}
-
-		case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:
-			// reserved non-control opcodes - unsupported, close connection
-			debug.Println("received reserved non-control opcode, closing connection")
-			wsClient.closeSignal <- nil
-			closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
-			wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
-			return &WSClientError{message: "Received reserved non-control opcode: Connection closed"}
-
-		case OP_CLOSE_CONN:
-			var responseCode []byte
-			if payloadLength != 0 {
-				data := wsClient.parseFrame(payloadLength)
-				responseCode = data[0:2]
-				closeCode := binary.BigEndian.Uint16(responseCode)
-				debug.Printf("Close code: %d, Message: %s\n", closeCode, data[2:])
-			}
-
-			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
-			wsClient.active.Store(false)
-			return &WSClientError{message: "Connection closed"}
-
-		case OP_PING:
-			debug.Println("got a ping, sending pong")
-			wsClient.pong(payloadLength)
-			continue
-
-		case OP_PONG:
-			debug.Println("got a pong")
-			continue
-
-		case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
-			// reserved control opcodes - unsupported, close connection
-			debug.Println("received reserved control opcode, closing connection")
-			wsClient.closeSignal <- nil
-			closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
-			wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
-			return &WSServerError{message: "Received reserved control opcode: Connection closed"}
-		}
+	bytesRead, readErr := wsClient.connection.Read(readBuffer)
+	if readErr != nil {
+		debug.Printf("Read Error: %s\n", readErr.Error())
+		return readErr
 	}
+
+	if bytesRead != 2 {
+		debug.Println("Invalid frame count")
+		return nil
+	}
+
+	controlByte := readBuffer[0]
+	opCode := controlByte & 0b00001111
+
+	payloadInfoByte := readBuffer[1]
+	mask := payloadInfoByte & 0b10000000
+	if mask != 0 {
+		debug.Println("Server should not set mask bit")
+		return &WSClientError{message: "Server set mask bit"}
+	}
+
+	payloadLength := payloadInfoByte & 0b01111111
+
+	switch opCode {
+	case OP_CONTINUE_FRAME, OP_TEXT_FRAME, OP_BINARY_FRAME:
+		data := wsClient.parseFrame(payloadLength)
+		fin := (controlByte & 0b10000000) != 0
+
+		if fin {
+			data = append(wsClient.fragments, data...)
+			wsClient.fragments = make([]byte, 0)
+
+			if wsClient.onMessage != nil {
+				wsClient.onMessage(data)
+			}
+		} else {
+			wsClient.fragments = append(wsClient.fragments, data...)
+		}
+
+	case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:
+		// reserved non-control opcodes - unsupported, close connection
+		debug.Println("received reserved non-control opcode, closing connection")
+		wsClient.closeSignal <- nil
+		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
+		wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
+		return &WSClientError{message: "Received reserved non-control opcode: Connection closed"}
+
+	case OP_CLOSE_CONN:
+		var responseCode []byte
+		if payloadLength != 0 {
+			data := wsClient.parseFrame(payloadLength)
+			responseCode = data[0:2]
+			closeCode := binary.BigEndian.Uint16(responseCode)
+			debug.Printf("Close code: %d, Message: %s\n", closeCode, data[2:])
+		}
+
+		wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+		wsClient.active.Store(false)
+		return &WSClientError{message: "Connection closed"}
+
+	case OP_PING:
+		debug.Println("got a ping, sending pong")
+		wsClient.pong(payloadLength)
+		return nil
+
+	case OP_PONG:
+		debug.Println("got a pong")
+		return nil
+
+	case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
+		// reserved control opcodes - unsupported, close connection
+		debug.Println("received reserved control opcode, closing connection")
+		wsClient.closeSignal <- nil
+		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
+		wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
+		return &WSServerError{message: "Received reserved control opcode: Connection closed"}
+	}
+
+	return nil
 }
 
 func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
@@ -395,7 +402,7 @@ func (wsClient *wsclient) handleClose(closeStatus uint, closeMessage string) err
 	wsClient.connection.SetReadDeadline(time.Now())
 
 	closeSignalReceived := false
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), wsClient.closeTimeout)
 	defer closeCancel()
 
 	select {
