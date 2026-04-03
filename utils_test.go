@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -22,7 +23,6 @@ type mockConnection struct {
 	closed       bool
 	readErr      error
 	writeErr     error
-	deadline     time.Time
 	readDeadline time.Time
 }
 
@@ -39,7 +39,7 @@ func (c *mockConnection) Read(b []byte) (int, error) {
 	}
 
 	if !c.readDeadline.IsZero() && time.Now().After(c.readDeadline) {
-		return 0, errors.New("Timeout")
+		return 0, fmt.Errorf("Read timeout: deadline is %v, now is %v", c.readDeadline, time.Now())
 	}
 
 	if c.readPos >= len(c.readData) {
@@ -73,7 +73,7 @@ func (c *mockConnection) Close() error {
 
 func (c *mockConnection) LocalAddr() net.Addr                { return &net.TCPAddr{} }
 func (c *mockConnection) RemoteAddr() net.Addr               { return &net.TCPAddr{} }
-func (c *mockConnection) SetDeadline(t time.Time) error      { c.deadline = t; return nil }
+func (c *mockConnection) SetDeadline(t time.Time) error      { c.readDeadline = t; return nil }
 func (c *mockConnection) SetReadDeadline(t time.Time) error  { c.readDeadline = t; return nil }
 func (c *mockConnection) SetWriteDeadline(t time.Time) error { return nil }
 
@@ -128,4 +128,10 @@ func buildServerFrame(controlByte byte, payload []byte) []byte {
 	frame = append(frame, payload...)
 
 	return frame
+}
+
+func newMockDialer(conn net.Conn) func(network, address string) (net.Conn, error) {
+	return func(network, address string) (net.Conn, error) {
+		return conn, nil
+	}
 }

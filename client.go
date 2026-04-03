@@ -28,6 +28,7 @@ func (err *WSClientError) Error() string {
 }
 
 type wsclient struct {
+	dial         func(network, address string) (net.Conn, error)
 	host         string
 	path         string
 	onConnect    func()
@@ -57,6 +58,7 @@ func WebSocket(rawURL string) (*wsclient, error) {
 	}
 
 	wsClient := &wsclient{
+		dial:         net.Dial,
 		host:         urlObject.Host,
 		path:         urlObject.Path,
 		closeSignal:  make(chan *struct{}),
@@ -82,7 +84,8 @@ func (wsClient *wsclient) OnMessage(messageCallback func([]byte)) {
 // Start initiates the WebSocket handshake with a WebSocket server. Once connected successfully
 // a new goroutine will be created which will read from the connection continuously
 func (wsClient *wsclient) Start(ctx context.Context) error {
-	connectionErr := wsClient.handleConnection()
+	wsKey := generateWSKey()
+	connectionErr := wsClient.handleConnection(wsKey)
 	if connectionErr != nil {
 		return connectionErr
 	}
@@ -108,6 +111,9 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		// graceful shutdown
 		debug.Println("Client context done")
+		go func() {
+			wsClient.closeSignal <- nil
+		}()
 
 	case e := <-clientErrors:
 		// error occured
@@ -126,7 +132,7 @@ func (wsClient *wsclient) Start(ctx context.Context) error {
 		wsClient.onDisconnect()
 	}
 
-	return nil
+	return ctx.Err()
 }
 
 func (wsClient *wsclient) IsActive() bool {
@@ -134,8 +140,8 @@ func (wsClient *wsclient) IsActive() bool {
 	return active
 }
 
-func (wsClient *wsclient) handleConnection() error {
-	conn, connErr := net.Dial("tcp", wsClient.host)
+func (wsClient *wsclient) handleConnection(wsKey string) error {
+	conn, connErr := wsClient.dial("tcp", wsClient.host)
 	if connErr != nil {
 		debug.Printf("Error connecting to %s, terminating connection.\n", wsClient.host)
 		if conn != nil {
@@ -145,8 +151,6 @@ func (wsClient *wsclient) handleConnection() error {
 	}
 
 	wsClient.connection = conn
-
-	wsKey := generateWSKey()
 	wsAccept := generateWSAccept(wsKey)
 
 	var content []byte
@@ -178,6 +182,9 @@ func (wsClient *wsclient) handleConnection() error {
 	}
 
 	responseReader := bytes.NewBuffer(ackPayload)
+	upgradeHeaderPresent := false
+	secWebsocketAcceptHeaderPresent := false
+
 	for {
 		line, readStrError := responseReader.ReadString('\n')
 		if readStrError != nil {
@@ -196,6 +203,7 @@ func (wsClient *wsclient) handleConnection() error {
 				debug.Println("Response not a WebSocket upgrade")
 				return &WSClientError{message: "Server response not a WebSocket upgrade"}
 			}
+			upgradeHeaderPresent = true
 
 		case strings.HasPrefix(line, "Sec-WebSocket-Accept"):
 			headerValue := strings.Split(line, ": ")[1]
@@ -204,7 +212,16 @@ func (wsClient *wsclient) handleConnection() error {
 					wsAccept, headerValue)
 				return &WSClientError{message: "Server responded with invalid WebSocket key"}
 			}
+			secWebsocketAcceptHeaderPresent = true
 		}
+	}
+
+	if !upgradeHeaderPresent {
+		return &WSClientError{message: "Invalid Upgrade header in response. Requires `Upgrade: websocket` header"}
+	}
+
+	if !secWebsocketAcceptHeaderPresent {
+		return &WSClientError{message: "Invalid Sec-WebSocket-Accept header in response. Requires header with valid accept key"}
 	}
 
 	return nil

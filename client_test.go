@@ -1,6 +1,7 @@
 package suede
 
 import (
+	"bytes"
 	"encoding/binary"
 	"slices"
 	"sync/atomic"
@@ -75,6 +76,63 @@ func TestWebsocketClientConstruction(t *testing.T) {
 		if client != nil || err == nil {
 			t.Errorf("Websocket client initialisation failed for URL %s. Expected nil client and non-nil error, got client = %v, err = %v", testCase.Url, client, err)
 		}
+	}
+}
+
+func TestClientHandleConnectionEstablishesConnection(t *testing.T) {
+	wsKey := generateWSKey()
+	wsAccept := generateWSAccept(wsKey)
+
+	handshakeReply := []byte("HTTP/1.1 101 Switching Protocols\r\n")
+	handshakeReply = append(handshakeReply, []byte("Upgrade: websocket\r\n")...)
+	handshakeReply = append(handshakeReply, []byte("Connection: Upgrade\r\n")...)
+	handshakeReply = append(handshakeReply, []byte("Sec-WebSocket-Accept: ")...)
+	handshakeReply = append(handshakeReply, wsAccept...)
+	handshakeReply = append(handshakeReply, []byte("\r\n\r\n")...)
+
+	conn := newMockConnection(handshakeReply)
+	dial := newMockDialer(conn)
+	client := &wsclient{
+		dial: dial,
+		path: "/ws",
+		host: "localhost",
+	}
+
+	err := client.handleConnection(wsKey)
+
+	if err != nil {
+		t.Errorf("Expected websocket connection to succeed, got error: %v", err)
+	}
+
+	written := conn.WrittenBytes()
+
+	expectedClientBytes := []byte("GET /ws HTTP/1.1\r\n")
+	expectedClientBytes = append(expectedClientBytes, []byte("Host: localhost\r\n")...)
+	expectedClientBytes = append(expectedClientBytes, []byte("Upgrade: websocket\r\n")...)
+	expectedClientBytes = append(expectedClientBytes, []byte("Connection: Upgrade\r\n")...)
+	expectedClientBytes = append(expectedClientBytes, []byte("Sec-WebSocket-Version: 13\r\n")...)
+	expectedClientBytes = append(expectedClientBytes, []byte("Sec-WebSocket-Key: ")...)
+	expectedClientBytes = append(expectedClientBytes, []byte(wsKey)...)
+	expectedClientBytes = append(expectedClientBytes, []byte("\r\n\r\n")...)
+
+	if !bytes.Equal(written, expectedClientBytes) {
+		t.Errorf("Expected client request to have websocket headers. Expected:\n%s, got\n%s", string(expectedClientBytes), string(written))
+	}
+}
+
+func TestClientHandleConnectionErrorsWhenNoWebsocketHeaders(t *testing.T) {
+	handshakeReply := []byte("\r\n\r\n")
+	conn := newMockConnection(handshakeReply)
+	dial := newMockDialer(conn)
+	client := &wsclient{
+		dial: dial,
+	}
+
+	wsKey := generateWSKey()
+	err := client.handleConnection(wsKey)
+
+	if err == nil {
+		t.Error("Expected error from invalid handshake reply")
 	}
 }
 

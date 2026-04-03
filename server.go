@@ -479,8 +479,8 @@ func (wsServer *wsserver) Shutdown(ctx context.Context) error {
 
 // TODO: TEST THIS FUNCTION I HAVE NO IDEA IF WHAT I'VE DONE IS CORRECT
 func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeStatus uint, closeMessage string) error {
-	// force normal read goroutine to exit
 	debug.Println("closing client")
+	// force normal read goroutine to exit
 	clientConnection.connection.SetReadDeadline(time.Now())
 
 	closeSignalReceived := false
@@ -530,6 +530,8 @@ func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeS
 			debug.Printf("Returned close code: %d\n", closeCode)
 		}
 	} else {
+		// NOTE: This path is hard to test
+		// Needs to continuously flood connection so read does not return 0 bytes and trigger error path
 		debug.Printf("Error: expected close response, but did not receive before timeout\nClosing connection anyway...\n")
 	}
 

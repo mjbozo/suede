@@ -522,6 +522,80 @@ func TestShutdownSetsActiveFalse(t *testing.T) {
 	}
 }
 
+func TestCloseClientSendsCloseFrame(t *testing.T) {
+	server, _ := WebSocketServer(8080, "/ws")
+	frame := buildClientFrame(FINAL_FRAGMENT|OP_CLOSE_CONN, []byte{0x03, 0xE8})
+	conn := newMockConnection(frame)
+	client := &ClientConnection{ID: "test", connection: conn, closeSignal: make(chan *struct{})}
+
+	go func() {
+		client.closeSignal <- nil
+	}()
+
+	payload := "Server closed connection"
+	err := server.closeClient(client, CLOSE_STATUS_NORMAL, payload)
+
+	if err != nil {
+		t.Errorf("Error closing client from server: %v", err)
+	}
+
+	written := conn.WrittenBytes()
+	if len(written) != len(payload)+4 {
+		t.Errorf("Expected %d bytes written, got %d", len(payload)+4, len(written))
+	}
+
+	if written[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
+		t.Errorf("Expected close op code, got %d", written[0])
+	}
+
+	if int(written[1]) != len(payload)+2 {
+		t.Errorf("Expected payload length byte to be %d, got %d", len(payload)+2, written[1])
+	}
+
+	if written[2] != 0x03 || written[3] != 0xE8 {
+		t.Errorf("Expected close status 0x3E8, got %x%x", written[2], written[3])
+	}
+}
+
+func TestCloseClientReadsCloseReply(t *testing.T) {
+	server, _ := WebSocketServer(8080, "/ws")
+	frame := buildClientFrame(FINAL_FRAGMENT|OP_CLOSE_CONN, []byte{0x03, 0xE8})
+	conn := newMockConnection(frame)
+	client := &ClientConnection{ID: "test", connection: conn, closeSignal: make(chan *struct{})}
+
+	go func() {
+		client.closeSignal <- nil
+	}()
+
+	payload := "Server closed connection"
+	err := server.closeClient(client, CLOSE_STATUS_NORMAL, payload)
+
+	if err != nil {
+		t.Errorf("Error closing client from server: %v", err)
+	}
+
+	written := conn.WrittenBytes()
+	if len(written) != len(payload)+4 {
+		t.Errorf("Expected %d bytes written, got %d", len(payload)+4, len(written))
+	}
+
+	if written[0] != FINAL_FRAGMENT|OP_CLOSE_CONN {
+		t.Errorf("Expected close op code, got %d", written[0])
+	}
+
+	if int(written[1]) != len(payload)+2 {
+		t.Errorf("Expected payload length byte to be %d, got %d", len(payload)+2, written[1])
+	}
+
+	if written[2] != 0x03 || written[3] != 0xE8 {
+		t.Errorf("Expected close status 0x3E8, got %x%x", written[2], written[3])
+	}
+}
+
+func TestCloseClientReturnsErrorOnTimeout(t *testing.T) {
+
+}
+
 func TestGenerateClientIDIsUnique(t *testing.T) {
 	ids := make(map[string]bool)
 	numClients := 10000
