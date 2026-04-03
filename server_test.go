@@ -592,10 +592,6 @@ func TestCloseClientReadsCloseReply(t *testing.T) {
 	}
 }
 
-func TestCloseClientReturnsErrorOnTimeout(t *testing.T) {
-
-}
-
 func TestGenerateClientIDIsUnique(t *testing.T) {
 	ids := make(map[string]bool)
 	numClients := 10000
