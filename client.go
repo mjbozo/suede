@@ -228,7 +228,7 @@ func (wsClient *wsclient) handleConnection(wsKey string) error {
 }
 
 func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
-	bytesRead, readErr := wsClient.connection.Read(readBuffer)
+	bytesRead, readErr := io.ReadFull(wsClient.connection, readBuffer)
 	if readErr != nil {
 		debug.Printf("Read Error: %s\n", readErr.Error())
 		return readErr
@@ -322,7 +322,7 @@ func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
 	case payloadLength == 126:
 		headerSize := 2
 		frameBuffer := make([]byte, headerSize)
-		bytesRead, err := wsClient.connection.Read(frameBuffer)
+		bytesRead, err := io.ReadFull(wsClient.connection, frameBuffer)
 		if bytesRead != headerSize || err != nil {
 			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
@@ -333,7 +333,7 @@ func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
 	case payloadLength == 127:
 		headerSize := 8
 		frameBuffer := make([]byte, headerSize)
-		bytesRead, err := wsClient.connection.Read(frameBuffer)
+		bytesRead, err := io.ReadFull(wsClient.connection, frameBuffer)
 		if bytesRead != headerSize || err != nil {
 			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
@@ -348,7 +348,7 @@ func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
 func (wsClient *wsclient) readFrameData(length uint64) []byte {
 	readBuffer := make([]byte, length)
 
-	bytesRead, err := wsClient.connection.Read(readBuffer)
+	bytesRead, err := io.ReadFull(wsClient.connection, readBuffer)
 	if bytesRead != int(length) || err != nil {
 		debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, length, err)
 		return nil
@@ -452,7 +452,7 @@ func (wsClient *wsclient) handleClose(closeStatus uint, closeMessage string) err
 	defer readCancel()
 
 	for closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN && readCtx.Err() == nil {
-		n, err := wsClient.connection.Read(closeBuf)
+		n, err := io.ReadFull(wsClient.connection, closeBuf)
 		if !errors.Is(err, os.ErrDeadlineExceeded) && (n != len(closeBuf) || err != nil) {
 			debug.Printf("Error closing connection safely. %d/%d bytes read. Error: %s\n", n, len(closeBuf), err)
 			errMsg := fmt.Sprintf("Error reading close frame from server: %v", err)

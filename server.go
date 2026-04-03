@@ -208,10 +208,10 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 
 func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection, readBuffer []byte) error {
 	connection := clientConnection.connection
-	bytesRead, readErr := connection.Read(readBuffer)
+	bytesRead, readErr := io.ReadFull(connection, readBuffer)
 
 	if readErr != nil {
-		if readErr == io.EOF {
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
 			debug.Println("Client disconnected")
 		} else {
 			debug.Printf("Read Error: %s\n", readErr.Error())
@@ -283,7 +283,7 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	case OP_PONG:
 		debug.Printf("got a pong: %v\n", readBuffer)
 		maskBuffer := make([]byte, 4)
-		connection.Read(maskBuffer)
+		io.ReadFull(connection, maskBuffer)
 		return nil
 
 	case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
@@ -304,7 +304,7 @@ func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []
 	case payloadLength < 126:
 		headerSize := 4
 		frameBuffer := make([]byte, headerSize)
-		bytesRead, err := connection.Read(frameBuffer)
+		bytesRead, err := io.ReadFull(connection, frameBuffer)
 		if bytesRead != headerSize || err != nil {
 			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
@@ -314,7 +314,7 @@ func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []
 	case payloadLength == 126:
 		headerSize := 6
 		frameBuffer := make([]byte, headerSize)
-		bytesRead, err := connection.Read(frameBuffer)
+		bytesRead, err := io.ReadFull(connection, frameBuffer)
 		if bytesRead != headerSize || err != nil {
 			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
@@ -327,7 +327,7 @@ func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []
 	case payloadLength == 127:
 		headerSize := 12
 		frameBuffer := make([]byte, headerSize)
-		bytesRead, err := connection.Read(frameBuffer)
+		bytesRead, err := io.ReadFull(connection, frameBuffer)
 		if bytesRead != headerSize || err != nil {
 			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
@@ -344,7 +344,7 @@ func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []
 func (wsServer *wsserver) readFrameData(connection net.Conn, mask []byte, length uint64) []byte {
 	readBuffer := make([]byte, length)
 
-	bytesRead, err := connection.Read(readBuffer)
+	bytesRead, err := io.ReadFull(connection, readBuffer)
 	if bytesRead != int(length) || err != nil {
 		debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, length, err)
 		return nil
@@ -513,7 +513,7 @@ func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeS
 	defer readCancel()
 
 	for closeBuf[0] != FINAL_FRAGMENT|OP_CLOSE_CONN && readCtx.Err() == nil {
-		n, err := clientConnection.connection.Read(closeBuf)
+		n, err := io.ReadFull(clientConnection.connection, closeBuf)
 		if !errors.Is(err, os.ErrDeadlineExceeded) && (n != len(closeBuf) || err != nil) {
 			errMsg := fmt.Sprintf("Error reading close frame from client: %v", err)
 			return &WSServerError{message: errMsg}
