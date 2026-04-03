@@ -316,7 +316,7 @@ func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []
 		frameBuffer := make([]byte, headerSize)
 		bytesRead, err := connection.Read(frameBuffer)
 		if bytesRead != headerSize || err != nil {
-			debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
+			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
 		}
 		sizeBytes := frameBuffer[:2]
@@ -329,7 +329,7 @@ func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []
 		frameBuffer := make([]byte, headerSize)
 		bytesRead, err := connection.Read(frameBuffer)
 		if bytesRead != headerSize || err != nil {
-			debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
+			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
 		}
 		sizeBytes := frameBuffer[:8]
@@ -346,7 +346,7 @@ func (wsServer *wsserver) readFrameData(connection net.Conn, mask []byte, length
 
 	bytesRead, err := connection.Read(readBuffer)
 	if bytesRead != int(length) || err != nil {
-		debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, length, err)
+		debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, length, err)
 		return nil
 	}
 

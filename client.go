@@ -253,7 +253,9 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 	case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:
 		// reserved non-control opcodes - unsupported, close connection
 		debug.Println("received reserved non-control opcode, closing connection")
-		wsClient.closeSignal <- nil
+		go func() {
+			wsClient.closeSignal <- nil
+		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
 		wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
 		return &WSClientError{message: "Received reserved non-control opcode: Connection closed"}
@@ -283,7 +285,9 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 	case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
 		// reserved control opcodes - unsupported, close connection
 		debug.Println("received reserved control opcode, closing connection")
-		wsClient.closeSignal <- nil
+		go func() {
+			wsClient.closeSignal <- nil
+		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
 		wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
 		return &WSServerError{message: "Received reserved control opcode: Connection closed"}
@@ -303,7 +307,7 @@ func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
 		frameBuffer := make([]byte, headerSize)
 		bytesRead, err := wsClient.connection.Read(frameBuffer)
 		if bytesRead != headerSize || err != nil {
-			debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
+			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
 		}
 		payloadLength16 := binary.BigEndian.Uint16(frameBuffer)
@@ -314,7 +318,7 @@ func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
 		frameBuffer := make([]byte, headerSize)
 		bytesRead, err := wsClient.connection.Read(frameBuffer)
 		if bytesRead != headerSize || err != nil {
-			debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
+			debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, headerSize, err)
 			return nil
 		}
 		payloadLength64 := binary.BigEndian.Uint64(frameBuffer)
@@ -329,7 +333,7 @@ func (wsClient *wsclient) readFrameData(length uint64) []byte {
 
 	bytesRead, err := wsClient.connection.Read(readBuffer)
 	if bytesRead != int(length) || err != nil {
-		debug.Println("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, length, err)
+		debug.Printf("Failed to read complete payload. Read %d/%d bytes. Error: %s\n", bytesRead, length, err)
 		return nil
 	}
 
@@ -449,6 +453,8 @@ func (wsClient *wsclient) handleClose(closeStatus uint, closeMessage string) err
 			debug.Printf("Returned close code: %d\n", closeCode)
 		}
 	} else {
+		// NOTE: This path is hard to test
+		// Needs to continuously flood connection so read does not return 0 bytes and trigger error path
 		debug.Printf("Error: expected close response, but did not receive before timeout\nClosing connection anyway...\n")
 	}
 

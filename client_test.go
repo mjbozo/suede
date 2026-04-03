@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestWebsocketClientConstruction(t *testing.T) {
@@ -597,8 +598,12 @@ func TestHandleCloseIsNoOpWhenInactive(t *testing.T) {
 }
 
 func TestHandleCloseSetsInactive(t *testing.T) {
-	conn := newMockConnection(nil)
-	client := &wsclient{connection: conn}
+	conn := newMockConnection([]byte{FINAL_FRAGMENT | OP_CLOSE_CONN, 0x02, 0x03, 0xE8})
+	client := &wsclient{
+		connection:   conn,
+		closeSignal:  make(chan *struct{}),
+		closeTimeout: 5 * time.Second,
+	}
 	client.active.Store(true)
 
 	go func() {
@@ -613,8 +618,12 @@ func TestHandleCloseSetsInactive(t *testing.T) {
 }
 
 func TestHandleCloseRepliesWithCloseFrame(t *testing.T) {
-	conn := newMockConnection(nil)
-	client := &wsclient{connection: conn}
+	conn := newMockConnection([]byte{FINAL_FRAGMENT | OP_CLOSE_CONN, 0x02, 0x03, 0xE8})
+	client := &wsclient{
+		connection:   conn,
+		closeSignal:  make(chan *struct{}),
+		closeTimeout: 5 * time.Second,
+	}
 	client.active.Store(true)
 
 	go func() {
@@ -643,6 +652,26 @@ func TestHandleCloseErrorsWithTimeoutWhenNoCloseSignal(t *testing.T) {
 
 	if err == nil {
 		t.Error("Expected error after timeout on client close")
+	}
+}
+
+func TestHandleCloseErrorsWhenNoCloseReply(t *testing.T) {
+	conn := newMockConnection([]byte{})
+	client := &wsclient{
+		connection:   conn,
+		closeSignal:  make(chan *struct{}),
+		closeTimeout: 5 * time.Second,
+	}
+	client.active.Store(true)
+
+	go func() {
+		client.closeSignal <- nil
+	}()
+
+	err := client.Close()
+
+	if err == nil {
+		t.Error("Expected client close to return error when reading non-close reply")
 	}
 }
 
@@ -681,5 +710,56 @@ func TestOnDisconnectCallbackOnDisconnect(t *testing.T) {
 
 	if !fired.Load() {
 		t.Error("Expected onDisconnect callback to be fired")
+	}
+}
+
+func TestClientSendsPing(t *testing.T) {
+	conn := newMockConnection(nil)
+	client := &wsclient{connection: conn}
+
+	client.Ping()
+
+	written := conn.WrittenBytes()
+	if len(written) != 6 {
+		t.Errorf("Expected 6 bytes for ping frame, got %d", len(written))
+	}
+
+	if written[0] != FINAL_FRAGMENT|OP_PING {
+		t.Errorf("Expected PING op code, got %d", written[0])
+	}
+
+	if written[1] != 0x80 {
+		t.Errorf("Expected masked frame with 0 length, got %d", written[1])
+	}
+}
+
+func TestClientReturnsErrorForInvalidOpCodes(t *testing.T) {
+	invalidOpCodes := []byte{
+		OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4,
+		OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5,
+	}
+
+	for _, opCode := range invalidOpCodes {
+		conn := newMockConnection(buildServerFrame(opCode, nil))
+		client := &wsclient{
+			connection:   conn,
+			closeSignal:  make(chan *struct{}),
+			closeTimeout: 0,
+		}
+		client.active.Store(true)
+
+		err := client.readFromConnection(make([]byte, 2))
+
+		if err == nil {
+			t.Error("Expected client to return error when invalid op code recieved")
+		}
+	}
+}
+
+func TestWSClientErrorReturnsMessage(t *testing.T) {
+	errorMessage := "Client error"
+	clientErr := &WSClientError{message: errorMessage}
+	if clientErr.Error() != errorMessage {
+		t.Errorf("Incorrect client error message. Expected %s, got %s", errorMessage, clientErr.Error())
 	}
 }
