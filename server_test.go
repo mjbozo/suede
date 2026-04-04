@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -181,8 +185,174 @@ func TestConcurrentServerSendsAreSafe(t *testing.T) {
 	wg.Wait()
 }
 
+func TestHandleConnectionErrorsWhenUpgradeHeaderMissing(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add("Sec-WebSocket-Key", generateWSKey())
+
+	res := newMockHijacker(newMockConnection(nil))
+	server, _ := WebSocketServer(8080, "/")
+	clientID, err := server.handleConnection(res, req)
+
+	if err == nil {
+		t.Error("Expected server to error when request missing Upgrade header")
+	}
+
+	if clientID != "" {
+		t.Errorf("Expected empty clientID when request missing Upgrade header, got %s", clientID)
+	}
+}
+
+func TestHandleConnectionErrorsWhenNoHijacker(t *testing.T) {
+	wsKey := generateWSKey()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add("Upgrade", "websocket")
+	req.Header.Add("Sec-WebSocket-Key", wsKey)
+	res := httptest.NewRecorder()
+
+	server, _ := WebSocketServer(8080, "/")
+	clientID, err := server.handleConnection(res, req)
+
+	if err == nil {
+		t.Error("Expected connection handler to fail at hijack attempt")
+	}
+
+	if clientID != "" {
+		t.Errorf("Expected empty clientID when hijack should fail")
+	}
+}
+
+func TestHandleConnectionErrorsWhenHijackFails(t *testing.T) {
+	wsKey := generateWSKey()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add("Upgrade", "websocket")
+	req.Header.Add("Sec-WebSocket-Key", wsKey)
+	res := newMockHijacker(newMockConnection(nil))
+	res.hijackErr = errors.New("Hijack error")
+
+	server, _ := WebSocketServer(8080, "/")
+	clientID, err := server.handleConnection(res, req)
+
+	if err == nil {
+		t.Error("Expected server to error when hijack fails")
+	}
+
+	if clientID != "" {
+		t.Errorf("Expected empty clientID when hijack fails")
+	}
+}
+
+func TestHandleConnectionErrorsOnWriteError(t *testing.T) {
+	wsKey := generateWSKey()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add("Upgrade", "websocket")
+	req.Header.Add("Sec-WebSocket-Key", wsKey)
+
+	conn := newMockConnection(nil)
+	conn.writeErr = errors.New("Failed to write")
+	res := newMockHijacker(conn)
+
+	server, _ := WebSocketServer(8080, "/")
+	clientID, err := server.handleConnection(res, req)
+
+	if err == nil {
+		t.Error("Expected connection handler to fail on connection write error")
+	}
+
+	if clientID != "" {
+		t.Errorf("Expected empty clientID when connection write errors")
+	}
+}
+
+func TestHandleConnectionErrorsWhenWSKeyHeaderMissing(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add("Upgrade", "websocket")
+	res := newMockHijacker(newMockConnection(nil))
+
+	server, _ := WebSocketServer(8080, "/")
+	clientID, err := server.handleConnection(res, req)
+
+	if err == nil {
+		t.Error("Expected server to error when request missing Sec-WebSocket-Key header")
+	}
+
+	if clientID != "" {
+		t.Errorf("Expected empty clientID when request missing Sec-WebSocket-Key header, got %s", clientID)
+	}
+}
+
+func TestHandleConnectionAcceptsValidRequest(t *testing.T) {
+	wsKey := generateWSKey()
+	wsAccept := generateWSAccept(wsKey)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add("Upgrade", "websocket")
+	req.Header.Add("Sec-WebSocket-Key", wsKey)
+	res := newMockHijacker(newMockConnection(nil))
+
+	server, _ := WebSocketServer(8080, "/")
+	clientID, err := server.handleConnection(res, req)
+
+	if err != nil {
+		t.Errorf("Expected no error from valid connection request, got %v", err)
+	}
+
+	written := string(res.conn.WrittenBytes())
+	if !strings.HasPrefix(written, "HTTP/1.1 101 Switching Protocols") {
+		t.Errorf("Expected status 101 from server, got %s", written)
+	}
+
+	if !strings.Contains(written, "Upgrade: websocket") {
+		t.Errorf("Expected header 'Upgrade: websocket' from server, got %s", written)
+	}
+
+	if !strings.Contains(written, "Connection: Upgrade") {
+		t.Errorf("Expected header 'Connection: Upgrade' from server, got %s", written)
+	}
+
+	if !strings.Contains(written, fmt.Sprintf("Sec-WebSocket-Accept: %s", wsAccept)) {
+		t.Errorf("Expected header 'Sec-WebSocket-Accept: %s' from server, got %s", wsAccept, written)
+	}
+
+	if clientID == "" {
+		t.Error("Expected non-empty clientID from valid connection request")
+	}
+
+	server.clientsMutex.Lock()
+	if _, ok := server.clients[clientID]; !ok {
+		t.Error("Expecting client to be added to server's client map, but was not found")
+	}
+	server.clientsMutex.Unlock()
+}
+
+func TestSuccessfulHandleConnectionCallsOnConnect(t *testing.T) {
+	wsKey := generateWSKey()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add("Upgrade", "websocket")
+	req.Header.Add("Sec-WebSocket-Key", wsKey)
+	res := newMockHijacker(newMockConnection(nil))
+
+	server, _ := WebSocketServer(8080, "/")
+	var fired atomic.Bool
+	server.OnConnect(func(cc *ClientConnection) {
+		fired.Store(true)
+	})
+
+	_, err := server.handleConnection(res, req)
+
+	if err != nil {
+		t.Errorf("Expected no error from valid connection request, got %v", err)
+	}
+
+	if !fired.Load() {
+		t.Error("Expected successful connection handler to call onConnect callback")
+	}
+}
+
 func TestServerErrorsWhenReadFrameMaskBitNotSet(t *testing.T) {
-	// frame without mask bit
 	frame := []byte{FINAL_FRAGMENT | OP_TEXT_FRAME, 0x05, 'h', 'e', 'l', 'l', 'o'}
 	conn := newMockConnection(frame)
 	server, _ := WebSocketServer(8080, "/ws")
@@ -366,6 +536,133 @@ func TestServerDoesNotPanicWhenOnMessageNil(t *testing.T) {
 	}
 }
 
+func TestParseFrameReturnsFrameData(t *testing.T) {
+	testCases := []struct {
+		payloadLength byte
+		data          []byte
+	}{
+		{payloadLength: 0x00},
+		{payloadLength: 0x05, data: []byte("hello")},
+		{payloadLength: 0x7E, data: make([]byte, 200)},
+		{payloadLength: 0x7F, data: make([]byte, 69420)},
+	}
+
+	for _, testCase := range testCases {
+		server, _ := WebSocketServer(8080, "/ws")
+		conn := newMockConnection(buildClientFrame(0, testCase.data))
+		conn.Read(make([]byte, 2)) // simulate first 2 bytes already being read
+		parsed := server.parseFrame(conn, testCase.payloadLength)
+
+		if !bytes.Equal(parsed, testCase.data) {
+			t.Errorf("Error parsing frame. Expected %v, got %v", testCase.data, parsed)
+		}
+	}
+}
+
+func TestParseFrameReturnsErrorOnReadErr(t *testing.T) {
+	testCases := []struct {
+		payloadLength byte
+		data          []byte
+	}{
+		{payloadLength: 0x00},
+		{payloadLength: 0x05, data: []byte("hello")},
+		{payloadLength: 0x7E, data: make([]byte, 200)},
+		{payloadLength: 0x7F, data: make([]byte, 69420)},
+	}
+
+	for _, testCase := range testCases {
+		server, _ := WebSocketServer(8080, "/ws")
+		conn := newMockConnection(buildClientFrame(0, testCase.data))
+		conn.Read(make([]byte, 2)) // simulate first 2 bytes already being read
+		conn.readErr = errors.New("Simulated read error")
+		parsed := server.parseFrame(conn, testCase.payloadLength)
+
+		if parsed != nil {
+			t.Error("Expected nil data returned after read error occurs")
+		}
+	}
+}
+
+func TestServerSendTextSetsCorrectBytes(t *testing.T) {
+	testCases := [][]byte{
+		[]byte("hello"),
+		make([]byte, 200),
+		make([]byte, 69420),
+		nil,
+	}
+
+	for _, msg := range testCases {
+		conn := newMockConnection(nil)
+		server, _ := WebSocketServer(8080, "/ws")
+		client := &ClientConnection{
+			connection:  conn,
+			fragments:   make([]byte, 0),
+			closeSignal: make(chan *struct{}),
+		}
+		err := server.SendText(client, msg)
+
+		if err != nil {
+			t.Errorf("Expected no error when sending text message, got %v", err)
+		}
+
+		written := conn.WrittenBytes()
+
+		if len(written) < 1 {
+			t.Fatalf("Expected at least 1 byte written, got %d", len(written))
+		}
+
+		fin := written[0] & 0b10000000
+		if fin == 0 {
+			t.Error("Expected fin bit to be set for send text")
+		}
+
+		opCode := written[0] & 0b00001111
+		if opCode != OP_TEXT_FRAME {
+			t.Errorf("Expected control byte to contain OP_TEXT_FRAME, but got %v", opCode)
+		}
+	}
+}
+
+func TestServerSendBinarySetsCorrectBytes(t *testing.T) {
+	testCases := [][]byte{
+		[]byte{0x01, 0x02, 0x03},
+		make([]byte, 200),
+		make([]byte, 69420),
+		nil,
+	}
+
+	for _, msg := range testCases {
+		conn := newMockConnection(nil)
+		server, _ := WebSocketServer(8080, "/ws")
+		client := &ClientConnection{
+			connection:  conn,
+			fragments:   make([]byte, 0),
+			closeSignal: make(chan *struct{}),
+		}
+		err := server.SendBinary(client, msg)
+
+		if err != nil {
+			t.Errorf("Expected no error when sending text message, got %v", err)
+		}
+
+		written := conn.WrittenBytes()
+
+		if len(written) < 1 {
+			t.Fatalf("Expected at least 1 byte written, got %d", len(written))
+		}
+
+		fin := written[0] & 0b10000000
+		if fin == 0 {
+			t.Error("Expected fin bit to be set for send text")
+		}
+
+		opCode := written[0] & 0b00001111
+		if opCode != OP_BINARY_FRAME {
+			t.Errorf("Expected control byte to contain OP_BINARY_FRAME, but got %v", opCode)
+		}
+	}
+}
+
 func TestBroadcastMessageSentToAllClients(t *testing.T) {
 	server, _ := WebSocketServer(8080, "/ws")
 
@@ -380,15 +677,19 @@ func TestBroadcastMessageSentToAllClients(t *testing.T) {
 		}
 	}
 
-	// TODO: Test cases with large payloads
 	testCases := []struct {
 		isBinary bool
 		payload  []byte
+		offset   int
 	}{
-		{isBinary: false, payload: []byte("broadcast message")},
-		{isBinary: false},
-		{isBinary: true, payload: []byte{0x01, 0x02, 0x03}},
-		{isBinary: true},
+		{isBinary: false, offset: 2},
+		{isBinary: false, payload: []byte("broadcast message"), offset: 2},
+		{isBinary: false, payload: make([]byte, 200), offset: 4},
+		{isBinary: false, payload: make([]byte, 69420), offset: 10},
+		{isBinary: true, offset: 2},
+		{isBinary: true, payload: []byte{0x01, 0x02, 0x03}, offset: 2},
+		{isBinary: true, payload: make([]byte, 200), offset: 4},
+		{isBinary: true, payload: make([]byte, 69420), offset: 10},
 	}
 
 	for _, testCase := range testCases {
@@ -400,9 +701,8 @@ func TestBroadcastMessageSentToAllClients(t *testing.T) {
 
 		for i, conn := range clientConnections {
 			written := conn.WrittenBytes()
-			if len(written) != len(testCase.payload)+2 {
-				// assuming small payloads
-				t.Errorf("client %d received wrong number of bytes. Expected %d, got %d", i, len(testCase.payload)+2, len(written))
+			if len(written) != len(testCase.payload)+testCase.offset {
+				t.Errorf("client %d received wrong number of bytes. Expected %d, got %d", i, len(testCase.payload)+testCase.offset, len(written))
 			}
 
 			// reset write buffer for next test
@@ -448,8 +748,12 @@ func TestBroadcastToEmptyClientsMapDoesNotPanic(t *testing.T) {
 	}()
 
 	server.BroadcastText([]byte("hello"))
+	server.BroadcastText(make([]byte, 200))
+	server.BroadcastText(make([]byte, 69420))
 	server.BroadcastText([]byte{})
 	server.BroadcastBinary([]byte{0x01, 0x02, 0x03})
+	server.BroadcastBinary(make([]byte, 200))
+	server.BroadcastBinary(make([]byte, 69420))
 	server.BroadcastBinary([]byte{})
 }
 
@@ -693,6 +997,65 @@ func TestPingSendsPingToAllClients(t *testing.T) {
 		opCode := written[0] & 0b00001111
 		if opCode != OP_PING {
 			t.Errorf("client %d: expected ping opcode, got %d", i, opCode)
+		}
+	}
+}
+
+func TestPongDoesNotError(t *testing.T) {
+	server, _ := WebSocketServer(8080, "/ws")
+	frame := buildClientFrame(FINAL_FRAGMENT|OP_PONG, nil)
+	conn := newMockConnection(frame)
+	client := &ClientConnection{ID: "test", connection: conn, closeSignal: make(chan *struct{})}
+
+	err := server.readFromConnection(client, make([]byte, 2))
+
+	if err != nil {
+		t.Errorf("Error when server received pong: %v", err)
+	}
+}
+
+func TestInvalidOpCodesReturnError(t *testing.T) {
+	invalidOpCodes := []byte{
+		OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4,
+		OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5,
+	}
+
+	for _, opCode := range invalidOpCodes {
+		server, _ := WebSocketServer(8080, "/ws")
+		conn := newMockConnection(buildClientFrame(opCode, nil))
+		client := &ClientConnection{ID: "test", connection: conn, closeSignal: make(chan *struct{})}
+		server.active.Store(true)
+
+		err := server.readFromConnection(client, make([]byte, 2))
+
+		if err == nil {
+			t.Error("Expected client to return error when invalid op code recieved")
+		}
+	}
+}
+
+func TestClientsCallReturnsAllClients(t *testing.T) {
+	server, _ := WebSocketServer(8080, "/ws")
+
+	clientConnections := make([]*mockConnection, 3)
+	for i := range clientConnections {
+		clientConnections[i] = newMockConnection(nil)
+		id := generateClientID()
+		server.clients[id] = &ClientConnection{
+			ID:          id,
+			connection:  clientConnections[i],
+			closeSignal: make(chan *struct{}),
+		}
+	}
+
+	clients := server.Clients()
+	if len(clients) != len(clientConnections) {
+		t.Errorf("Wrong number of clients returned. Expected %d, got %d", len(clientConnections), len(clients))
+	}
+
+	for _, client := range clients {
+		if _, ok := server.clients[client.ID]; !ok {
+			t.Error("Client not present in server clients map")
 		}
 	}
 }

@@ -258,7 +258,9 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:
 		// reserved non-control opcodes - unsupported, close connection
 		debug.Println("received reserved non-control opcode, closing connection")
-		clientConnection.closeSignal <- nil
+		go func() {
+			clientConnection.closeSignal <- nil
+		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
 		wsServer.closeClient(clientConnection, CLOSE_STATUS_ERROR, closeMessage)
 		return &WSServerError{message: "Received reserved non-control opcode: Connection closed"}
@@ -289,7 +291,9 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
 		// reserved control opcodes - unsupported, close connection
 		debug.Println("received reserved control opcode, closing connection")
-		clientConnection.closeSignal <- nil
+		go func() {
+			clientConnection.closeSignal <- nil
+		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
 		wsServer.closeClient(clientConnection, CLOSE_STATUS_ERROR, closeMessage)
 		return &WSServerError{message: "Received reserved control opcode: Connection closed"}
@@ -477,7 +481,6 @@ func (wsServer *wsserver) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// TODO: TEST THIS FUNCTION I HAVE NO IDEA IF WHAT I'VE DONE IS CORRECT
 func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeStatus uint, closeMessage string) error {
 	debug.Println("closing client")
 	// force normal read goroutine to exit

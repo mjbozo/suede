@@ -1,11 +1,13 @@
 package suede
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -81,6 +83,41 @@ func (c *mockConnection) WrittenBytes() []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.written
+}
+
+type mockHijacker struct {
+	conn       *mockConnection
+	header     http.Header
+	statusCode int
+	hijackErr  error
+}
+
+func newMockHijacker(conn *mockConnection) *mockHijacker {
+	return &mockHijacker{
+		conn:   conn,
+		header: make(http.Header),
+	}
+}
+
+func (h *mockHijacker) Write(b []byte) (int, error) {
+	return h.conn.Write(b)
+}
+
+func (h *mockHijacker) WriteHeader(code int) {
+	h.statusCode = code
+}
+
+func (h *mockHijacker) Header() http.Header {
+	return h.header
+}
+
+func (h *mockHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h.hijackErr != nil {
+		return nil, nil, h.hijackErr
+	}
+
+	rw := bufio.NewReadWriter(bufio.NewReader(h.conn), bufio.NewWriter(h.conn))
+	return h.conn, rw, nil
 }
 
 func buildClientFrame(controlByte byte, payload []byte) []byte {
