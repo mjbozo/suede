@@ -357,18 +357,18 @@ func (wsClient *wsclient) readFrameData(length uint64) []byte {
 	return readBuffer
 }
 
-func (wsClient *wsclient) SendText(data []byte) {
+func (wsClient *wsclient) SendText(data []byte) error {
 	controlByte := FINAL_FRAGMENT | OP_TEXT_FRAME
-	wsClient.send(controlByte, data)
+	return wsClient.send(controlByte, data)
 }
 
-func (wsClient *wsclient) SendBinary(data []byte) {
+func (wsClient *wsclient) SendBinary(data []byte) error {
 	controlByte := FINAL_FRAGMENT | OP_BINARY_FRAME
-	wsClient.send(controlByte, data)
+	return wsClient.send(controlByte, data)
 }
 
 // Sends bytes to connected WebSocket server
-func (wsClient *wsclient) send(controlByte byte, data []byte) {
+func (wsClient *wsclient) send(controlByte byte, data []byte) error {
 	mask := generateMaskKey()
 
 	maskedData := make([]byte, 0, len(data))
@@ -406,8 +406,12 @@ func (wsClient *wsclient) send(controlByte byte, data []byte) {
 
 	n, err := wsClient.connection.Write(frame)
 	if n != len(frame) || err != nil {
-		debug.Printf("Send error: %s, wrote %d/%d bytes\n", err.Error(), n, len(frame))
+		errorMsg := fmt.Sprintf("Send error: %s, wrote %d/%d bytes\n", err.Error(), n, len(frame))
+		debug.Println(errorMsg)
+		return &WSClientError{message: errorMsg}
 	}
+
+	return nil
 }
 
 func (wsClient *wsclient) Close() error {
