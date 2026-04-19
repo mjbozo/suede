@@ -21,4 +21,5 @@ const (
 	CLOSE_STATUS_NORMAL uint = 0x3E8
 	CLOSE_STATUS_GOING  uint = 0x3EC
 	CLOSE_STATUS_ERROR  uint = 0x3ED
+	RSV1_MASK           byte = 0b01000000
 )

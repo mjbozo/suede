@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/mjbozo/suede/debug"
+	"github.com/mjbozo/suede/deflate"
 )
 
 type WSClientError struct {
@@ -28,17 +29,19 @@ func (err *WSClientError) Error() string {
 }
 
 type wsclient struct {
-	dial         func(network, address string) (net.Conn, error)
-	host         string
-	path         string
-	onConnect    func()
-	onDisconnect func()
-	onMessage    func([]byte)
-	connection   net.Conn
-	active       atomic.Bool
-	closeSignal  chan *struct{}
-	fragments    []byte
-	closeTimeout time.Duration
+	dial            func(network, address string) (net.Conn, error)
+	host            string
+	path            string
+	onConnect       func()
+	onDisconnect    func()
+	onMessage       func([]byte)
+	connection      net.Conn
+	active          atomic.Bool
+	closeSignal     chan *struct{}
+	fragments       []byte
+	closeTimeout    time.Duration
+	deflateConfig   *deflate.DeflateConfig
+	messageDeflated bool
 }
 
 func WebSocket(rawURL string) (*wsclient, error) {
@@ -153,14 +156,21 @@ func (wsClient *wsclient) handleConnection(wsKey string) error {
 	wsClient.connection = conn
 	wsAccept := generateWSAccept(wsKey)
 
-	var content []byte
-	content = append(content, fmt.Sprintf("GET %s HTTP/1.1\r\n", wsClient.path)...)
-	content = append(content, fmt.Sprintf("Host: %s\r\n", wsClient.host)...)
-	content = append(content, "Upgrade: websocket\r\n"...)
-	content = append(content, "Connection: Upgrade\r\n"...)
-	content = append(content, "Sec-WebSocket-Version: 13\r\n"...)
-	content = append(content, fmt.Sprintf("Sec-WebSocket-Key: %s", wsKey)...)
+	headerLines := [][]byte{
+		fmt.Appendf(nil, "GET %s HTTP/1.1", wsClient.path),
+		fmt.Appendf(nil, "Host: %s", wsClient.host),
+		[]byte("Upgrade: websocket"),
+		[]byte("Connection: Upgrade"),
+		[]byte("Sec-WebSocket-Version: 13"),
+		fmt.Appendf(nil, "Sec-WebSocket-Key: %s", wsKey),
+	}
+
+	// client is always requesting to use permessage-deflate
+	headerLines = append(headerLines, deflate.DefaultDeflateConfig().Header())
+
+	content := bytes.Join(headerLines, []byte("\r\n"))
 	content = append(content, "\r\n\r\n"...)
+
 	conn.Write(content)
 
 	ackBuffer := make([]byte, 1)
@@ -213,6 +223,14 @@ func (wsClient *wsclient) handleConnection(wsKey string) error {
 				return &WSClientError{message: "Server responded with invalid WebSocket key"}
 			}
 			secWebsocketAcceptHeaderPresent = true
+
+		case strings.HasPrefix(line, "Sec-WebSocket-Extensions"):
+			deflateConfig, err := deflate.Parse(line)
+			if err != nil {
+				return &WSClientError{message: "Extension negotiation error: " + err.Error()}
+			}
+
+			wsClient.deflateConfig = deflateConfig
 		}
 	}
 
@@ -241,6 +259,9 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 
 	controlByte := readBuffer[0]
 	opCode := controlByte & 0b00001111
+	if controlByte&RSV1_MASK > 0 {
+		wsClient.messageDeflated = true
+	}
 
 	payloadInfoByte := readBuffer[1]
 	mask := payloadInfoByte & 0b10000000
@@ -263,6 +284,8 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 			if wsClient.onMessage != nil {
 				wsClient.onMessage(data)
 			}
+
+			wsClient.messageDeflated = false
 		} else {
 			wsClient.fragments = append(wsClient.fragments, data...)
 		}
@@ -342,6 +365,15 @@ func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
 		data = wsClient.readFrameData(uint64(payloadLength64))
 	}
 
+	if wsClient.messageDeflated {
+		decompressed, err := wsClient.deflateConfig.Inflate(data)
+		if err != nil {
+			panic(err)
+		}
+
+		data = decompressed
+	}
+
 	return data
 }
 
@@ -369,8 +401,18 @@ func (wsClient *wsclient) SendBinary(data []byte) error {
 
 // Sends bytes to connected WebSocket server
 func (wsClient *wsclient) send(controlByte byte, data []byte) error {
-	mask := generateMaskKey()
+	opCode := controlByte & 0b00001111
+	if wsClient.deflateConfig != nil && len(data) > 0 && (opCode == OP_TEXT_FRAME || opCode == OP_BINARY_FRAME) {
+		compressedData, err := wsClient.deflateConfig.Deflate(data)
+		if err != nil {
+			return err
+		}
 
+		data = compressedData
+		controlByte |= RSV1_MASK // set RSVD1 bit for permessage-deflate
+	}
+
+	mask := generateMaskKey()
 	maskedData := make([]byte, 0, len(data))
 	for i := range data {
 		maskedByte := data[i] ^ mask[i%4]

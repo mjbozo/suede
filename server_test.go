@@ -551,7 +551,8 @@ func TestParseFrameReturnsFrameData(t *testing.T) {
 		server, _ := WebSocketServer(8080, "/ws")
 		conn := newMockConnection(buildClientFrame(0, testCase.data))
 		conn.Read(make([]byte, 2)) // simulate first 2 bytes already being read
-		parsed := server.parseFrame(conn, testCase.payloadLength)
+		clientConn := &ClientConnection{connection: conn}
+		parsed := server.parseFrame(clientConn, testCase.payloadLength)
 
 		if !bytes.Equal(parsed, testCase.data) {
 			t.Errorf("Error parsing frame. Expected %v, got %v", testCase.data, parsed)
@@ -575,7 +576,9 @@ func TestParseFrameReturnsErrorOnReadErr(t *testing.T) {
 		conn := newMockConnection(buildClientFrame(0, testCase.data))
 		conn.Read(make([]byte, 2)) // simulate first 2 bytes already being read
 		conn.readErr = errors.New("Simulated read error")
-		parsed := server.parseFrame(conn, testCase.payloadLength)
+
+		clientConn := &ClientConnection{connection: conn}
+		parsed := server.parseFrame(clientConn, testCase.payloadLength)
 
 		if parsed != nil {
 			t.Error("Expected nil data returned after read error occurs")

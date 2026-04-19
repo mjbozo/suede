@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mjbozo/suede/deflate"
 )
 
 func TestWebsocketClientConstruction(t *testing.T) {
@@ -112,7 +114,8 @@ func TestClientHandleConnectionEstablishesConnection(t *testing.T) {
 	expectedClientBytes = append(expectedClientBytes, []byte("Connection: Upgrade\r\n")...)
 	expectedClientBytes = append(expectedClientBytes, []byte("Sec-WebSocket-Version: 13\r\n")...)
 	expectedClientBytes = append(expectedClientBytes, []byte("Sec-WebSocket-Key: ")...)
-	expectedClientBytes = append(expectedClientBytes, []byte(wsKey)...)
+	expectedClientBytes = append(expectedClientBytes, []byte(wsKey+"\r\n")...)
+	expectedClientBytes = append(expectedClientBytes, deflate.DefaultDeflateConfig().Header()...)
 	expectedClientBytes = append(expectedClientBytes, []byte("\r\n\r\n")...)
 
 	if !bytes.Equal(written, expectedClientBytes) {

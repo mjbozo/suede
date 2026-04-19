@@ -57,8 +57,6 @@ func main() {
 		}
 	}()
 
-	fmt.Println("Server starting")
-
 	for {
 		select {
 		case <-quit:

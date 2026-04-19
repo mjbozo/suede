@@ -1,6 +1,7 @@
 package suede
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mjbozo/suede/debug"
+	"github.com/mjbozo/suede/deflate"
 )
 
 type WSServerError struct {
@@ -28,11 +30,13 @@ func (err *WSServerError) Error() string {
 }
 
 type ClientConnection struct {
-	ID          string
-	connection  net.Conn
-	fragments   []byte
-	closeSignal chan *struct{}
-	mu          sync.Mutex
+	ID              string
+	connection      net.Conn
+	fragments       []byte
+	closeSignal     chan *struct{}
+	deflateConfig   *deflate.DeflateConfig
+	messageDeflated bool
+	mu              sync.Mutex
 }
 
 type wsserver struct {
@@ -119,7 +123,8 @@ func (wsServer *wsserver) IsActive() bool {
 func (wsServer *wsserver) handleClientConnection(res http.ResponseWriter, req *http.Request) {
 	clientID, connectionErr := wsServer.handleConnection(res, req)
 	if connectionErr != nil {
-		panic("Failed to establish connection with client: " + connectionErr.Error())
+		http.Error(res, connectionErr.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	wsServer.clientsMutex.RLock()
@@ -139,7 +144,8 @@ func (wsServer *wsserver) handleClientConnection(res http.ResponseWriter, req *h
 
 	closeErr := client.connection.Close()
 	if closeErr != nil {
-		panic("Failed to close connection")
+		http.Error(res, closeErr.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	wsServer.clientsMutex.Lock()
@@ -163,6 +169,8 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 		return "", &WSServerError{message: "Empty Sec-WebSocket-Key header value"}
 	}
 
+	deflateConfig := deflate.Negotiate(req.Header.Get("Sec-WebSocket-Extensions"))
+
 	wsAccept := generateWSAccept(wsKey)
 	hijacker, ok := res.(http.Hijacker)
 	if !ok {
@@ -174,11 +182,18 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 		return "", &WSServerError{message: "Failed to hijack the connection"}
 	}
 
-	var content []byte
-	content = append(content, "HTTP/1.1 101 Switching Protocols\r\n"...)
-	content = append(content, "Upgrade: websocket\r\n"...)
-	content = append(content, "Connection: Upgrade\r\n"...)
-	content = append(content, fmt.Sprintf("Sec-WebSocket-Accept: %s", wsAccept)...)
+	headerLines := [][]byte{
+		[]byte("HTTP/1.1 101 Switching Protocols"),
+		[]byte("Upgrade: websocket"),
+		[]byte("Connection: Upgrade"),
+		fmt.Appendf(nil, "Sec-WebSocket-Accept: %s", wsAccept),
+	}
+
+	if deflateConfig != nil {
+		headerLines = append(headerLines, deflateConfig.Header())
+	}
+
+	content := bytes.Join(headerLines, []byte("\r\n"))
 	content = append(content, "\r\n\r\n"...)
 	bytesWritten, err := hijackedConnection.Write(content)
 
@@ -189,10 +204,11 @@ func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Re
 
 	clientID := generateClientID()
 	clientConnection := &ClientConnection{
-		ID:          clientID,
-		connection:  hijackedConnection,
-		fragments:   make([]byte, 0),
-		closeSignal: make(chan *struct{}),
+		ID:            clientID,
+		connection:    hijackedConnection,
+		fragments:     make([]byte, 0),
+		closeSignal:   make(chan *struct{}),
+		deflateConfig: deflateConfig,
 	}
 
 	wsServer.clientsMutex.Lock()
@@ -227,6 +243,9 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 	controlByte := readBuffer[0]
 	opCode := controlByte & 0b00001111
+	if controlByte&RSV1_MASK > 0 {
+		clientConnection.messageDeflated = true
+	}
 
 	payloadInfoByte := readBuffer[1]
 	mask := payloadInfoByte & 0b10000000
@@ -239,7 +258,7 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 	switch opCode {
 	case OP_CONTINUE_FRAME, OP_TEXT_FRAME, OP_BINARY_FRAME:
-		data := wsServer.parseFrame(connection, payloadLength)
+		data := wsServer.parseFrame(clientConnection, payloadLength)
 		fin := (controlByte & 0b10000000) != 0
 
 		if fin {
@@ -249,6 +268,7 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 			if wsServer.onMessage != nil {
 				wsServer.onMessage(clientConnection, data)
 			}
+			clientConnection.messageDeflated = false
 		} else {
 			clientConnection.mu.Lock()
 			clientConnection.fragments = append(clientConnection.fragments, data...)
@@ -268,7 +288,7 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	case OP_CLOSE_CONN:
 		var responseCode []byte
 		if payloadLength != 0 {
-			data := wsServer.parseFrame(clientConnection.connection, payloadLength)
+			data := wsServer.parseFrame(clientConnection, payloadLength)
 			responseCode = data[0:2]
 			closeCode := binary.BigEndian.Uint16(responseCode)
 			debug.Printf("Close code: %d, Message: %s\n", closeCode, data[2:])
@@ -302,7 +322,9 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	return nil
 }
 
-func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []byte {
+func (wsServer *wsserver) parseFrame(clientConnection *ClientConnection, payloadLength byte) []byte {
+	connection := clientConnection.connection
+
 	var data []byte
 	switch {
 	case payloadLength < 126:
@@ -342,6 +364,15 @@ func (wsServer *wsserver) parseFrame(connection net.Conn, payloadLength byte) []
 		data = wsServer.readFrameData(connection, mask, uint64(payloadLength64))
 	}
 
+	if clientConnection.messageDeflated {
+		decompressed, err := clientConnection.deflateConfig.Inflate(data)
+		if err != nil {
+			panic(err)
+		}
+
+		data = decompressed
+	}
+
 	return data
 }
 
@@ -378,6 +409,17 @@ func (wsServer *wsserver) SendBinary(connection *ClientConnection, data []byte) 
 func (wsServer *wsserver) send(client *ClientConnection, controlByte byte, data []byte) error {
 	if client.connection == nil {
 		return &WSServerError{message: "Client connection is nil"}
+	}
+
+	opCode := controlByte & 0b00001111
+	if client.deflateConfig != nil && len(data) > 0 && (opCode == OP_TEXT_FRAME || opCode == OP_BINARY_FRAME) {
+		compressedData, err := client.deflateConfig.Deflate(data)
+		if err != nil {
+			return err
+		}
+
+		data = compressedData
+		controlByte |= RSV1_MASK // set RSVD1 bit for permessage-deflate
 	}
 
 	payloadLength := len(data)
@@ -528,7 +570,10 @@ func (wsServer *wsserver) closeClient(clientConnection *ClientConnection, closeS
 		debug.Println("Received close response")
 		payloadLength := closeBuf[1] & 0b01111111
 		if payloadLength != 0 {
-			data := wsServer.parseFrame(clientConnection.connection, payloadLength)
+			data := wsServer.parseFrame(clientConnection, payloadLength)
+			if len(data) != int(payloadLength) {
+				return &WSServerError{message: "Error reading close response, payload size incorrect"}
+			}
 			closeCode := binary.BigEndian.Uint16(data)
 			debug.Printf("Returned close code: %d\n", closeCode)
 		}
@@ -553,7 +598,7 @@ func (wsServer *wsserver) Ping() {
 }
 
 func (wsServer *wsserver) pong(client *ClientConnection, payloadLength byte) {
-	pingData := wsServer.parseFrame(client.connection, payloadLength)
+	pingData := wsServer.parseFrame(client, payloadLength)
 	wsServer.send(client, FINAL_FRAGMENT|OP_PONG, pingData)
 }
 
