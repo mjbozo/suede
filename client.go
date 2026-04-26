@@ -34,7 +34,7 @@ type wsclient struct {
 	path            string
 	onConnect       func()
 	onDisconnect    func()
-	onMessage       func([]byte)
+	onMessage       func([]byte, bool)
 	connection      net.Conn
 	active          atomic.Bool
 	closeSignal     chan *struct{}
@@ -80,7 +80,7 @@ func (wsClient *wsclient) OnDisconnect(disconnectCallback func()) {
 	wsClient.onDisconnect = disconnectCallback
 }
 
-func (wsClient *wsclient) OnMessage(messageCallback func([]byte)) {
+func (wsClient *wsclient) OnMessage(messageCallback func([]byte, bool)) {
 	wsClient.onMessage = messageCallback
 }
 
@@ -282,7 +282,7 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 			wsClient.fragments = make([]byte, 0)
 
 			if wsClient.onMessage != nil {
-				wsClient.onMessage(data)
+				wsClient.onMessage(data, opCode == OP_BINARY_FRAME)
 			}
 
 			wsClient.messageDeflated = false

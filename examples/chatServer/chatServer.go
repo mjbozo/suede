@@ -25,7 +25,7 @@ func main() {
 		server.BroadcastText([]byte("User has left the chat"))
 	})
 
-	server.OnMessage(func(client *suede.ClientConnection, data []byte) {
+	server.OnMessage(func(client *suede.ClientConnection, data []byte, isBinary bool) {
 		server.BroadcastText(data)
 	})
 

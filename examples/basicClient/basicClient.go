@@ -23,7 +23,7 @@ func main() {
 		fmt.Println("Disconnect callback")
 	})
 
-	wsClient.OnMessage(func(data []byte) {
+	wsClient.OnMessage(func(data []byte, isBinary bool) {
 		fmt.Printf("Data = %s\n", data)
 	})
 

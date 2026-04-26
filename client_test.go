@@ -414,7 +414,7 @@ func TestOnMessageCallbackForUnfragmentedFrame(t *testing.T) {
 		client := &wsclient{connection: conn, fragments: make([]byte, 0)}
 
 		var received []byte
-		client.OnMessage(func(b []byte) {
+		client.OnMessage(func(b []byte, isBinary bool) {
 			received = b
 		})
 
@@ -437,7 +437,7 @@ func TestOnMessageCallbackForFragmentedFrames(t *testing.T) {
 	client := &wsclient{connection: conn, fragments: make([]byte, 0)}
 
 	var received []byte
-	client.OnMessage(func(b []byte) {
+	client.OnMessage(func(b []byte, isBinary bool) {
 		received = b
 	})
 
@@ -461,8 +461,8 @@ func TestOnMessageCallbackForFragmentedFrames(t *testing.T) {
 
 func TestClientErrorsIfMaskBitSetFromServer(t *testing.T) {
 	testCases := [][]byte{
-		[]byte{FINAL_FRAGMENT | OP_TEXT_FRAME, 0x85, 'h', 'e', 'l', 'l', 'o'},
-		[]byte{FINAL_FRAGMENT | OP_BINARY_FRAME, 0x83, 0x01, 0x02, 0x03},
+		{FINAL_FRAGMENT | OP_TEXT_FRAME, 0x85, 'h', 'e', 'l', 'l', 'o'},
+		{FINAL_FRAGMENT | OP_BINARY_FRAME, 0x83, 0x01, 0x02, 0x03},
 	}
 
 	for _, frame := range testCases {

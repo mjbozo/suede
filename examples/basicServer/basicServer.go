@@ -21,7 +21,7 @@ func main() {
 		fmt.Println("Client disconnected")
 	})
 
-	wsServer.OnMessage(func(client *suede.ClientConnection, data []byte) {
+	wsServer.OnMessage(func(client *suede.ClientConnection, data []byte, isBinary bool) {
 		fmt.Printf("Message = %s\n", data)
 		wsServer.BroadcastText([]byte("broadcasting..."))
 	})

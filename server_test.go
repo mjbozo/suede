@@ -385,7 +385,7 @@ func TestServerReadFromConnectionCallsOnMessage(t *testing.T) {
 		}
 
 		var received []byte
-		server.onMessage = func(c *ClientConnection, data []byte) {
+		server.onMessage = func(c *ClientConnection, data []byte, isBinary bool) {
 			received = data
 		}
 
@@ -415,7 +415,7 @@ func TestServerCallsOnMessageAfterFinalFragmentedMessage(t *testing.T) {
 	}
 
 	var received []byte
-	server.onMessage = func(c *ClientConnection, data []byte) {
+	server.onMessage = func(c *ClientConnection, data []byte, isBinary bool) {
 		received = data
 	}
 
@@ -628,7 +628,7 @@ func TestServerSendTextSetsCorrectBytes(t *testing.T) {
 
 func TestServerSendBinarySetsCorrectBytes(t *testing.T) {
 	testCases := [][]byte{
-		[]byte{0x01, 0x02, 0x03},
+		{0x01, 0x02, 0x03},
 		make([]byte, 200),
 		make([]byte, 69420),
 		nil,
@@ -960,13 +960,13 @@ func TestOnMessageServerCallbackFired(t *testing.T) {
 	server, _ := WebSocketServer(8080, "/ws")
 
 	var fired atomic.Bool
-	server.OnMessage(func(c *ClientConnection, data []byte) {
+	server.OnMessage(func(c *ClientConnection, data []byte, isBinary bool) {
 		fired.Store(true)
 	})
 
 	client := &ClientConnection{ID: "test", connection: newMockConnection(nil)}
 	if server.onMessage != nil {
-		server.onMessage(client, []byte("hello"))
+		server.onMessage(client, []byte("hello"), false)
 	}
 
 	if !fired.Load() {

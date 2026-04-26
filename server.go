@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,7 +45,7 @@ type wsserver struct {
 	Path         string
 	onConnect    func(*ClientConnection)
 	onDisconnect func(*ClientConnection)
-	onMessage    func(*ClientConnection, []byte)
+	onMessage    func(*ClientConnection, []byte, bool)
 	active       atomic.Bool
 	clients      map[string]*ClientConnection
 	clientsMutex sync.RWMutex
@@ -69,7 +70,7 @@ func (wsServer *wsserver) OnDisconnect(disconnectCallback func(*ClientConnection
 	wsServer.onDisconnect = disconnectCallback
 }
 
-func (wsServer *wsserver) OnMessage(messageCallback func(*ClientConnection, []byte)) {
+func (wsServer *wsserver) OnMessage(messageCallback func(*ClientConnection, []byte, bool)) {
 	wsServer.onMessage = messageCallback
 }
 
@@ -160,7 +161,11 @@ func (wsServer *wsserver) handleClientConnection(res http.ResponseWriter, req *h
 }
 
 func (wsServer *wsserver) handleConnection(res http.ResponseWriter, req *http.Request) (string, error) {
-	if req.Header.Get("Upgrade") != "websocket" {
+	if !strings.EqualFold(req.Header.Get("Connection"), "Upgrade") {
+		return "", &WSServerError{message: "Request header not requesting connection upgrade"}
+	}
+
+	if !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
 		return "", &WSServerError{message: "Request header not requesting websocket upgrade"}
 	}
 
@@ -266,7 +271,7 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 			clientConnection.fragments = make([]byte, 0)
 
 			if wsServer.onMessage != nil {
-				wsServer.onMessage(clientConnection, data)
+				wsServer.onMessage(clientConnection, data, opCode == OP_BINARY_FRAME)
 			}
 			clientConnection.messageDeflated = false
 		} else {
@@ -291,7 +296,7 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 			data := wsServer.parseFrame(clientConnection, payloadLength)
 			responseCode = data[0:2]
 			closeCode := binary.BigEndian.Uint16(responseCode)
-			debug.Printf("Close code: %d, Message: %s\n", closeCode, data[2:])
+			debug.Printf("Close code received: %d, Message: %s\n", closeCode, data[2:])
 		}
 
 		wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
@@ -438,10 +443,10 @@ func (wsServer *wsserver) send(client *ClientConnection, controlByte byte, data 
 
 	if payloadLength <= 125 {
 		payload = append(payload, byte(payloadLength))
-	} else if payloadLength <= (1 << 16) {
+	} else if payloadLength < (1 << 16) {
 		payload = append(payload, 0x7E)
 		payload = binary.BigEndian.AppendUint16(payload, uint16(payloadLength))
-	} else if payloadLength > (1 << 16) {
+	} else if payloadLength >= (1 << 16) {
 		payload = append(payload, 0x7F)
 		payload = binary.BigEndian.AppendUint64(payload, uint64(payloadLength))
 	}

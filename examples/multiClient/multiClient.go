@@ -33,7 +33,7 @@ func main() {
 			client.SendText(fmt.Appendf(nil, "Hello from client #%d", i))
 		})
 
-		client.OnMessage(func(b []byte) {
+		client.OnMessage(func(b []byte, isBinary bool) {
 			fmt.Println(string(b))
 		})
 

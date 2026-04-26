@@ -28,7 +28,7 @@ func main() {
 		client.SendText([]byte(name + " has joined the chat"))
 	})
 
-	client.OnMessage(func(data []byte) {
+	client.OnMessage(func(data []byte, isBinary bool) {
 		fmt.Printf("%s\n", data)
 	})
 
