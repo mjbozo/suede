@@ -249,7 +249,25 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	controlByte := readBuffer[0]
 	opCode := controlByte & 0b00001111
 	if controlByte&RSV1_MASK > 0 {
-		clientConnection.messageDeflated = true
+		if clientConnection.deflateConfig != nil {
+			clientConnection.messageDeflated = true
+		} else {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSServerError{message: "RSV1 bit set and not expected"}
+		}
+	}
+
+	if controlByte&RSV2_MASK > 0 {
+		responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+		wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+		return &WSServerError{message: "RSV2 bit set and not expected"}
+	}
+
+	if controlByte&RSV3_MASK > 0 {
+		responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+		wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+		return &WSServerError{message: "RSV3 bit set and not expected"}
 	}
 
 	payloadInfoByte := readBuffer[1]
@@ -280,14 +298,14 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 			clientConnection.mu.Unlock()
 		}
 
-	case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4:
+	case OP_NCTRL_RSVD1, OP_NCTRL_RSVD2, OP_NCTRL_RSVD3, OP_NCTRL_RSVD4, OP_NCTRL_RSVD5:
 		// reserved non-control opcodes - unsupported, close connection
 		debug.Println("received reserved non-control opcode, closing connection")
 		go func() {
 			clientConnection.closeSignal <- nil
 		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
-		wsServer.closeClient(clientConnection, CLOSE_STATUS_ERROR, closeMessage)
+		wsServer.closeClient(clientConnection, CLOSE_STATUS_PROTOCOL_ERR, closeMessage)
 		return &WSServerError{message: "Received reserved non-control opcode: Connection closed"}
 
 	case OP_CLOSE_CONN:
@@ -304,13 +322,25 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 	case OP_PING:
 		debug.Println("got a ping, sending a pong")
+		if payloadLength > 125 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSServerError{message: "Ping payload too long"}
+		}
+
 		wsServer.pong(clientConnection, payloadLength)
 		return nil
 
 	case OP_PONG:
 		debug.Printf("got a pong: %v\n", readBuffer)
-		maskBuffer := make([]byte, 4)
-		io.ReadFull(connection, maskBuffer)
+		if payloadLength > 125 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSServerError{message: "Pong payload too long"}
+		}
+
+		readBuffer := make([]byte, payloadLength+4)
+		io.ReadFull(connection, readBuffer)
 		return nil
 
 	case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
@@ -320,7 +350,7 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 			clientConnection.closeSignal <- nil
 		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
-		wsServer.closeClient(clientConnection, CLOSE_STATUS_ERROR, closeMessage)
+		wsServer.closeClient(clientConnection, CLOSE_STATUS_PROTOCOL_ERR, closeMessage)
 		return &WSServerError{message: "Received reserved control opcode: Connection closed"}
 	}
 
