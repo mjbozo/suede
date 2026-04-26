@@ -289,6 +289,7 @@ func TestHandleConnectionAcceptsValidRequest(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Add("Upgrade", "websocket")
+	req.Header.Add("Connection", "Upgrade")
 	req.Header.Add("Sec-WebSocket-Key", wsKey)
 	res := newMockHijacker(newMockConnection(nil))
 
@@ -332,6 +333,7 @@ func TestSuccessfulHandleConnectionCallsOnConnect(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Add("Upgrade", "websocket")
+	req.Header.Add("Connection", "Upgrade")
 	req.Header.Add("Sec-WebSocket-Key", wsKey)
 	res := newMockHijacker(newMockConnection(nil))
 
