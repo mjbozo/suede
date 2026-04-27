@@ -17,10 +17,23 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mjbozo/suede/debug"
 	"github.com/mjbozo/suede/deflate"
 )
+
+var allowedCloseCodes = map[uint16]bool{
+	uint16(CLOSE_STATUS_NORMAL):        true,
+	uint16(CLOSE_STATUS_GOING):         true,
+	uint16(CLOSE_STATUS_PROTOCOL_ERR):  true,
+	uint16(CLOSE_STATUS_DATATYPE_ERR):  true,
+	uint16(CLOSE_STATUS_TYPE_MISMATCH): true,
+	uint16(CLOSE_STATUS_VIOLATION):     true,
+	uint16(CLOSE_STATUS_TOO_BIG):       true,
+	uint16(CLOSE_STATUS_NEGOTIATE_ERR): true,
+	uint16(CLOSE_STATUS_UNEXPECTED):    true,
+}
 
 type WSServerError struct {
 	message string
@@ -34,6 +47,7 @@ type ClientConnection struct {
 	ID              string
 	connection      net.Conn
 	fragments       []byte
+	messageOpCode   byte
 	closeSignal     chan *struct{}
 	deflateConfig   *deflate.DeflateConfig
 	messageDeflated bool
@@ -247,7 +261,9 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 	}
 
 	controlByte := readBuffer[0]
+	fin := (controlByte & 0b10000000) != 0
 	opCode := controlByte & 0b00001111
+
 	if controlByte&RSV1_MASK > 0 {
 		if clientConnection.deflateConfig != nil {
 			clientConnection.messageDeflated = true
@@ -281,17 +297,49 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 	switch opCode {
 	case OP_CONTINUE_FRAME, OP_TEXT_FRAME, OP_BINARY_FRAME:
+		if opCode != OP_CONTINUE_FRAME {
+			// first fragmented frame
+			clientConnection.mu.Lock()
+			clientConnection.messageOpCode = opCode
+			clientConnection.mu.Unlock()
+		}
+
+		clientConnection.mu.Lock()
+		messageOpCode := clientConnection.messageOpCode
+		currentFragments := clientConnection.fragments
+		clientConnection.mu.Unlock()
+
+		if opCode == OP_CONTINUE_FRAME && messageOpCode == 0 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSServerError{message: "Recieved continue frame, but nothing to continue"}
+		}
+
+		if opCode != OP_CONTINUE_FRAME && len(currentFragments) > 0 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSServerError{message: fmt.Sprintf("Received opCode %08b, but expecting continuation op code", opCode)}
+		}
+
 		data := wsServer.parseFrame(clientConnection, payloadLength)
-		fin := (controlByte & 0b10000000) != 0
 
 		if fin {
+			clientConnection.mu.Lock()
 			data = append(clientConnection.fragments, data...)
 			clientConnection.fragments = make([]byte, 0)
+			clientConnection.messageDeflated = false
+			clientConnection.messageOpCode = 0
+			clientConnection.mu.Unlock()
+
+			if messageOpCode == OP_TEXT_FRAME && !utf8.Valid(data) {
+				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_TYPE_MISMATCH))
+				wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+				return &WSServerError{message: fmt.Sprintf("Received opCode %08b, but expecting continuation op code", opCode)}
+			}
 
 			if wsServer.onMessage != nil {
-				wsServer.onMessage(clientConnection, data, opCode == OP_BINARY_FRAME)
+				wsServer.onMessage(clientConnection, data, messageOpCode == OP_BINARY_FRAME)
 			}
-			clientConnection.messageDeflated = false
 		} else {
 			clientConnection.mu.Lock()
 			clientConnection.fragments = append(clientConnection.fragments, data...)
@@ -310,11 +358,29 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 	case OP_CLOSE_CONN:
 		var responseCode []byte
+		if payloadLength > 125 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSServerError{message: "Close payload too long"}
+		}
+
 		if payloadLength != 0 {
 			data := wsServer.parseFrame(clientConnection, payloadLength)
+
+			if !utf8.Valid(data[2:]) {
+				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_TYPE_MISMATCH))
+				wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+				return &WSServerError{message: "Ping cannot be fragmented"}
+			}
+
 			responseCode = data[0:2]
 			closeCode := binary.BigEndian.Uint16(responseCode)
 			debug.Printf("Close code received: %d, Message: %s\n", closeCode, data[2:])
+			if !closeCodeAllowed(closeCode) {
+				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+				wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+				return &WSServerError{message: "Ping cannot be fragmented"}
+			}
 		}
 
 		wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
@@ -322,6 +388,13 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 	case OP_PING:
 		debug.Println("got a ping, sending a pong")
+
+		if !fin {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSServerError{message: "Ping cannot be fragmented"}
+		}
+
 		if payloadLength > 125 {
 			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
 			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
@@ -333,6 +406,13 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 	case OP_PONG:
 		debug.Printf("got a pong: %v\n", readBuffer)
+
+		if !fin {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSServerError{message: "Pong cannot be fragmented"}
+		}
+
 		if payloadLength > 125 {
 			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
 			wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
@@ -656,4 +736,24 @@ func generateClientID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func closeCodeAllowed(code uint16) bool {
+	if code <= 999 {
+		return false
+	}
+
+	if code >= 1000 && code <= 2999 {
+		if v, ok := allowedCloseCodes[code]; ok {
+			return v
+		}
+
+		return false
+	}
+
+	if code >= 5000 {
+		return false
+	}
+
+	return true
 }

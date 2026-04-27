@@ -442,10 +442,10 @@ func TestServerCloseFrameSendsCloseResponse(t *testing.T) {
 		reason      string
 	}{
 		{closeStatus: uint16(CLOSE_STATUS_NORMAL), reason: "test"},
-		{closeStatus: uint16(CLOSE_STATUS_ERROR), reason: "test"},
+		{closeStatus: uint16(CLOSE_STATUS_PROTOCOL_ERR), reason: "test"},
 		{closeStatus: uint16(CLOSE_STATUS_GOING), reason: "test"},
 		{closeStatus: uint16(CLOSE_STATUS_NORMAL)},
-		{closeStatus: uint16(CLOSE_STATUS_ERROR)},
+		{closeStatus: uint16(CLOSE_STATUS_PROTOCOL_ERR)},
 		{closeStatus: uint16(CLOSE_STATUS_GOING)},
 	}
 

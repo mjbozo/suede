@@ -297,7 +297,7 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 			wsClient.closeSignal <- nil
 		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
-		wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
+		wsClient.handleClose(CLOSE_STATUS_PROTOCOL_ERR, closeMessage)
 		return &WSClientError{message: "Received reserved non-control opcode: Connection closed"}
 
 	case OP_CLOSE_CONN:
@@ -329,7 +329,7 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 			wsClient.closeSignal <- nil
 		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
-		wsClient.handleClose(CLOSE_STATUS_ERROR, closeMessage)
+		wsClient.handleClose(CLOSE_STATUS_PROTOCOL_ERR, closeMessage)
 		return &WSServerError{message: "Received reserved control opcode: Connection closed"}
 	}
 
