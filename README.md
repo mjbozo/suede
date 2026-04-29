@@ -1,5 +1,7 @@
 # Suede - A Go WebSockets Package
 
+> 100% pass on server Autobahn Testsuite
+
 Suede WebSockets is a Go WebSocket package which provides an extremely simple and easy to use
 WebSocket interface.
 

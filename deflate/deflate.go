@@ -19,12 +19,18 @@ const (
 type DeflateConfig struct {
 	serverNoContextTakeover bool
 	clientNoContextTakeover bool
+	decompressor            io.ReadCloser
+	compressor              *flate.Writer
 }
 
 func DefaultDeflateConfig() *DeflateConfig {
+	flateWriter, _ := flate.NewWriter(nil, flate.BestSpeed)
+
 	return &DeflateConfig{
 		serverNoContextTakeover: true,
 		clientNoContextTakeover: true,
+		decompressor:            flate.NewReader(nil),
+		compressor:              flateWriter,
 	}
 }
 
@@ -44,7 +50,7 @@ func (c *DeflateConfig) Header() []byte {
 		header = append(header, []byte("client_no_context_takeover;")...)
 	}
 
-	header = fmt.Appendf(header, "server_max_window_bits=%d;client_max_window_bits=%d;", maxWindowBits, maxWindowBits)
+	header = fmt.Appendf(header, "server_max_window_bits=%d;client_max_window_bits=%d", maxWindowBits, maxWindowBits)
 
 	return header
 }
@@ -158,17 +164,15 @@ func (c *DeflateConfig) Deflate(data []byte) ([]byte, error) {
 
 	debug.Printf("Data to deflate: %v\n", data)
 	var writer bytes.Buffer
-	compressor, err := flate.NewWriter(&writer, flate.DefaultCompression)
+	writer.Grow(len(data))
+	c.compressor.Reset(&writer)
+
+	n, err := c.compressor.Write(data)
 	if err != nil {
 		return nil, err
 	}
 
-	n, err := compressor.Write(data)
-	if err != nil {
-		return nil, err
-	}
-
-	err = compressor.Close()
+	err = c.compressor.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -187,11 +191,12 @@ func (c *DeflateConfig) Inflate(data []byte) ([]byte, error) {
 	data = append(data, 0x00, 0x00, 0xFF, 0xFF)
 	debug.Printf("Data to inflate: %v\n", data)
 	reader := bytes.NewReader(data)
-	decompressor := flate.NewReader(reader)
-	defer decompressor.Close()
+	if flateReader, ok := c.decompressor.(flate.Resetter); ok {
+		flateReader.Reset(reader, nil)
+	}
 
-	decompressed, err := io.ReadAll(decompressor)
-	if err != nil {
+	decompressed, err := io.ReadAll(c.decompressor)
+	if err != nil && err != io.ErrUnexpectedEOF {
 		return nil, err
 	}
 

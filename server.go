@@ -327,9 +327,16 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 			clientConnection.mu.Lock()
 			data = append(clientConnection.fragments, data...)
 			clientConnection.fragments = make([]byte, 0)
-			clientConnection.messageDeflated = false
-			clientConnection.messageOpCode = 0
 			clientConnection.mu.Unlock()
+
+			if clientConnection.messageDeflated {
+				decompressed, err := clientConnection.deflateConfig.Inflate(data)
+				if err != nil {
+					panic(err)
+				}
+
+				data = decompressed
+			}
 
 			if messageOpCode == OP_TEXT_FRAME && !utf8.Valid(data) {
 				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_TYPE_MISMATCH))
@@ -340,6 +347,11 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 			if wsServer.onMessage != nil {
 				wsServer.onMessage(clientConnection, data, messageOpCode == OP_BINARY_FRAME)
 			}
+
+			clientConnection.mu.Lock()
+			clientConnection.messageDeflated = false
+			clientConnection.messageOpCode = 0
+			clientConnection.mu.Unlock()
 		} else {
 			clientConnection.mu.Lock()
 			clientConnection.fragments = append(clientConnection.fragments, data...)
@@ -477,15 +489,6 @@ func (wsServer *wsserver) parseFrame(clientConnection *ClientConnection, payload
 		mask := frameBuffer[8:12]
 		payloadLength64 := binary.BigEndian.Uint64(sizeBytes)
 		data = wsServer.readFrameData(connection, mask, uint64(payloadLength64))
-	}
-
-	if clientConnection.messageDeflated {
-		decompressed, err := clientConnection.deflateConfig.Inflate(data)
-		if err != nil {
-			panic(err)
-		}
-
-		data = decompressed
 	}
 
 	return data
