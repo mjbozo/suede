@@ -87,74 +87,77 @@ func Negotiate(extensionHeader string) *DeflateConfig {
 }
 
 func Parse(extensionHeader string) (*DeflateConfig, error) {
-	var config *DeflateConfig
-
-	extensionHeader = strings.ReplaceAll(extensionHeader, " ", "")
+	extensionHeader = strings.ReplaceAll(strings.TrimSpace(extensionHeader), " ", "")
 	extensionOptions := strings.SplitSeq(extensionHeader, ",")
 
 	for option := range extensionOptions {
-		validationErr := validateHeaderOption(option)
+		validConfig, validationErr := validateExtensionOption(option)
 		if validationErr == nil {
-			config = &DeflateConfig{}
-			config.clientNoContextTakeover = true
-			config.serverNoContextTakeover = true
-			break
+			flateWriter, _ := flate.NewWriter(nil, flate.BestSpeed)
+			validConfig.compressor = flateWriter
+			validConfig.decompressor = flate.NewReader(nil)
+			return validConfig, nil
+		} else {
+			debug.Println(validationErr)
 		}
 	}
 
-	if config == nil {
-		return nil, errors.New("No agreed extension, declining connection")
-	}
-
-	return config, nil
+	return nil, errors.New("No agreed extension, declining connection")
 }
 
-func validateHeaderOption(option string) error {
-	serverNoContextTakeover := false
-	clientNoContextTakeover := false
+func validateExtensionOption(option string) (*DeflateConfig, error) {
+	potentialConfig := &DeflateConfig{
+		clientNoContextTakeover: false,
+		serverNoContextTakeover: false,
+	}
+
+	debug.Printf("Server option: %s\n", option)
+
+	clientDeflateEnabled := true
+	serverDeflateEnabled := true
 
 	headerParts := strings.SplitSeq(option, ";")
 	for part := range headerParts {
 		if after, ok := strings.CutPrefix(part, "client_max_window_bits="); ok {
 			bits, err := strconv.Atoi(after)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
-			if bits != maxWindowBits {
-				return errors.New("Can't support < 15 window bits")
+			if bits < maxWindowBits {
+				clientDeflateEnabled = false
 			}
 		}
 
 		if after, ok := strings.CutPrefix(part, "server_max_window_bits="); ok {
 			bits, err := strconv.Atoi(after)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
-			if bits != maxWindowBits {
-				return errors.New("Can't support < 15 window bits")
+			if bits < maxWindowBits {
+				serverDeflateEnabled = false
 			}
 		}
 
 		if strings.Contains(part, "client_no_context_takeover") {
-			clientNoContextTakeover = true
+			potentialConfig.clientNoContextTakeover = true
 		}
 
 		if strings.Contains(part, "server_no_context_takeover") {
-			serverNoContextTakeover = true
+			potentialConfig.serverNoContextTakeover = true
 		}
 	}
 
-	if !clientNoContextTakeover {
-		return errors.New("client context takeover not supported")
+	if !clientDeflateEnabled {
+		potentialConfig.clientNoContextTakeover = false
 	}
 
-	if !serverNoContextTakeover {
-		return errors.New("server context takeover not supported")
+	if !serverDeflateEnabled {
+		potentialConfig.serverNoContextTakeover = false
 	}
 
-	return nil
+	return potentialConfig, nil
 }
 
 func (c *DeflateConfig) Deflate(data []byte) ([]byte, error) {
@@ -201,6 +204,10 @@ func (c *DeflateConfig) Inflate(data []byte) ([]byte, error) {
 	}
 
 	return decompressed, nil
+}
+
+func (c *DeflateConfig) Enabled() (bool, bool) {
+	return c.serverNoContextTakeover, c.clientNoContextTakeover
 }
 
 func parseWindowBits(header, param string) int {

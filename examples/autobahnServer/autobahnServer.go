@@ -3,14 +3,22 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/mjbozo/suede"
+
+	_ "net/http/pprof"
 )
 
 func main() {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	server, wsErr := suede.WebSocketServer(9001, "/")
 	if wsErr != nil {
 		panic("could not start server")

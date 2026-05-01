@@ -131,7 +131,7 @@ func TestParseReturnsConfigWithValidExtensionHeader(t *testing.T) {
 
 func TestParseReturnsErrorWithInvalidExtensionHeader(t *testing.T) {
 	header := "permessage-deflate; "
-	header += "client_max_window_bits=15; server_max_window_bits=15"
+	header += "client_max_window_bits=abc; server_max_window_bits=15"
 	config, err := Parse(header)
 	if err == nil {
 		t.Error("expected error when invalid extension header received")
@@ -166,31 +166,39 @@ func TestParseReturnsErrorWhenClientMaxWindowBitsLessThan15(t *testing.T) {
 	header := "permessage-deflate; client_no_context_takeover; server_no_context_takeover; "
 	header += "client_max_window_bits=14; server_max_window_bits=15"
 	config, err := Parse(header)
-	if err == nil {
-		t.Error("expected error when invalid extension header received")
+	if err != nil {
+		t.Error("expected no error when window bits < 15 extension header received")
 	}
 
-	if config != nil {
-		t.Error("expected nil config when invalid option offered")
+	if config == nil {
+		t.Error("expected non-nil config when window bits < 15 option offered")
+	}
+
+	if config.clientNoContextTakeover {
+		t.Error("expected client to be disabled when window bits < 15")
 	}
 }
 
-func TestParseReturnsErrorWhenServerMaxWindowBitsLessThan15(t *testing.T) {
+func TestParseReturnsConfigWithDisabledWhenServerMaxWindowBitsLessThan15(t *testing.T) {
 	header := "permessage-deflate; client_no_context_takeover; server_no_context_takeover; "
 	header += "client_max_window_bits=15; server_max_window_bits=14"
 	config, err := Parse(header)
-	if err == nil {
-		t.Error("expected error when invalid extension header received")
+	if err != nil {
+		t.Error("expected no error when window bits < 15 extension header received")
 	}
 
-	if config != nil {
-		t.Error("expected nil config when invalid option offered")
+	if config == nil {
+		t.Error("expected non-nil config when window bits < 15 option offered")
+	}
+
+	if config.serverNoContextTakeover {
+		t.Error("expected server to be disabled when window bits < 15")
 	}
 }
 
 func TestParseReturnsConfigWhenValidOptionExists(t *testing.T) {
-	header := "permessage-deflate; client_max_window_bits=15; server_max_window_bits=14,"
-	header += "permessage-deflate; client_no_context_takeover; server_no_context_takeover;"
+	header := "permessage-deflate; client_max_window_bits=15; server_max_window_bits=abc,"
+	header += "permessage-deflate; client_no_context_takeover; server_no_context_takeover"
 	config, err := Parse(header)
 	if err != nil {
 		t.Errorf("expected valid config, got error: %v\n", err)

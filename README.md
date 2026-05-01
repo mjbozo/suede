@@ -1,6 +1,7 @@
 # Suede - A Go WebSockets Package
 
 > 100% pass on server Autobahn Testsuite
+> 100% pass on client Autobahn Testsuite
 
 Suede WebSockets is a Go WebSocket package which provides an extremely simple and easy to use
 WebSocket interface.
@@ -25,19 +26,19 @@ func main() {
 	}
 
 	// define behavior when client connects to server
-	wsClient.OnConnect = func() {
+	wsClient.OnConnect(func() {
 		fmt.Println("Connected to server")
-	}
+	})
 
 	// define behaviour when client disconnects from server
-	wsClient.OnDisconnect = func() {
+	wsClient.OnDisconnect(func() {
 		fmt.Println("Disconnected from server")
-	}
+	})
 
 	// define behaviour when client receives message from server
-	wsClient.OnMessage = func(data []byte) {
+	wsClient.OnMessage(func(data []byte, isBinary bool) {
 		fmt.Printf("Received message: %s\n", data)
-	}
+	})
 
 	// connect and run client
 	wsClient.Start(context.Background())
@@ -60,17 +61,17 @@ func main() {
 	}
 
 	// define behaviour when client connects to server
-	wsServer.OnConnect = func() {
+	wsServer.OnConnect(func(client *ClientConnection) {
 		fmt.Println("Client connected")
-	}
+	})
 
 	// define behaviour when client disconnects from server
-	wsServer.OnDisconnect = func() {
+	wsServer.OnDisconnect(func(client *ClientConnection) {
 		fmt.Println("Client disconnected")
-	}
+	})
 
 	// define behaviour when server received message from client
-	wsServer.OnMessage = func(data []byte) {
+	wsServer.OnMessage(func(client *ClientConnection, data []byte, isBinary bool) {
 		fmt.Printf("Received message: %s\n", data)
 	}
 

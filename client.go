@@ -15,10 +15,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mjbozo/suede/debug"
 	"github.com/mjbozo/suede/deflate"
 )
+
+// TODO: Graceful close on all errors, surely can have a common function to handle it
+// TODO: Better header handling
 
 type WSClientError struct {
 	message string
@@ -39,6 +43,7 @@ type wsclient struct {
 	active          atomic.Bool
 	closeSignal     chan *struct{}
 	fragments       []byte
+	messageOpCode   byte
 	closeTimeout    time.Duration
 	deflateConfig   *deflate.DeflateConfig
 	messageDeflated bool
@@ -60,13 +65,18 @@ func WebSocket(rawURL string) (*wsclient, error) {
 		urlObject.Path = "/"
 	}
 
+	path := urlObject.Path
+	if len(urlObject.RawQuery) != 0 {
+		path = fmt.Sprintf("%s?%s", path, urlObject.RawQuery)
+	}
+
 	wsClient := &wsclient{
 		dial:         net.Dial,
 		host:         urlObject.Host,
-		path:         urlObject.Path,
+		path:         path,
 		closeSignal:  make(chan *struct{}),
 		fragments:    make([]byte, 0),
-		closeTimeout: 5 * time.Second,
+		closeTimeout: 1 * time.Second,
 	}
 
 	return wsClient, nil
@@ -209,7 +219,7 @@ func (wsClient *wsclient) handleConnection(wsKey string) error {
 
 		switch {
 		case strings.HasPrefix(line, "Upgrade"):
-			if !strings.HasSuffix(line, "websocket\r\n") {
+			if !strings.HasSuffix(strings.ToUpper(line), "WEBSOCKET\r\n") {
 				debug.Println("Response not a WebSocket upgrade")
 				return &WSClientError{message: "Server response not a WebSocket upgrade"}
 			}
@@ -258,9 +268,29 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 	}
 
 	controlByte := readBuffer[0]
+	fin := (controlByte & 0b10000000) != 0
 	opCode := controlByte & 0b00001111
+
 	if controlByte&RSV1_MASK > 0 {
-		wsClient.messageDeflated = true
+		if wsClient.deflateConfig != nil {
+			wsClient.messageDeflated = true
+		} else {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSClientError{message: "RSV1 bit set and not expected"}
+		}
+	}
+
+	if controlByte&RSV2_MASK > 0 {
+		responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+		wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+		return &WSClientError{message: "RSV2 bit set and not expected"}
+	}
+
+	if controlByte&RSV3_MASK > 0 {
+		responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+		wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+		return &WSClientError{message: "RSV3 bit set and not expected"}
 	}
 
 	payloadInfoByte := readBuffer[1]
@@ -274,18 +304,55 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 
 	switch opCode {
 	case OP_CONTINUE_FRAME, OP_TEXT_FRAME, OP_BINARY_FRAME:
+		if opCode != OP_CONTINUE_FRAME {
+			// first fragmented frame
+			wsClient.messageOpCode = opCode
+		}
+
+		messageOpCode := wsClient.messageOpCode
+		currentFragments := wsClient.fragments
+
+		if opCode == OP_CONTINUE_FRAME && messageOpCode == 0 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSClientError{message: "Recieved continue frame, but nothing to continue"}
+		}
+
+		if opCode != OP_CONTINUE_FRAME && len(currentFragments) > 0 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSClientError{message: "Recieved continue frame, but nothing to continue"}
+		}
+
 		data := wsClient.parseFrame(payloadLength)
-		fin := (controlByte & 0b10000000) != 0
 
 		if fin {
 			data = append(wsClient.fragments, data...)
 			wsClient.fragments = make([]byte, 0)
 
+			if wsClient.messageDeflated {
+				decompressed, err := wsClient.deflateConfig.Inflate(data)
+				if err != nil {
+					responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+					wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+					return &WSClientError{message: fmt.Sprintf("Failed to inflate data: %v", err)}
+				}
+
+				data = decompressed
+			}
+
+			if messageOpCode == OP_TEXT_FRAME && !utf8.Valid(data) {
+				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_TYPE_MISMATCH))
+				wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+				return &WSClientError{message: fmt.Sprintf("Received opCode %08b, but expecting continuation op code", opCode)}
+			}
+
 			if wsClient.onMessage != nil {
-				wsClient.onMessage(data, opCode == OP_BINARY_FRAME)
+				wsClient.onMessage(data, messageOpCode == OP_BINARY_FRAME)
 			}
 
 			wsClient.messageDeflated = false
+			wsClient.messageOpCode = 0
 		} else {
 			wsClient.fragments = append(wsClient.fragments, data...)
 		}
@@ -302,11 +369,36 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 
 	case OP_CLOSE_CONN:
 		var responseCode []byte
+		if payloadLength > 125 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSClientError{message: "Close payload too long"}
+		}
+
 		if payloadLength != 0 {
 			data := wsClient.parseFrame(payloadLength)
+
+			if len(data) < 2 {
+				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+				wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+				return &WSServerError{message: "Ping cannot be fragmented"}
+			}
+
+			if !utf8.Valid(data[2:]) {
+				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_TYPE_MISMATCH))
+				wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+				return &WSServerError{message: "Ping cannot be fragmented"}
+			}
+
 			responseCode = data[0:2]
 			closeCode := binary.BigEndian.Uint16(responseCode)
 			debug.Printf("Close code: %d, Message: %s\n", closeCode, data[2:])
+
+			if !closeCodeAllowed(closeCode) {
+				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+				wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+				return &WSServerError{message: "Ping cannot be fragmented"}
+			}
 		}
 
 		wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
@@ -315,11 +407,40 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 
 	case OP_PING:
 		debug.Println("got a ping, sending pong")
+
+		if !fin {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSClientError{message: "Ping cannot be fragmented"}
+		}
+
+		if payloadLength > 125 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSClientError{message: "Ping payload too long"}
+		}
+
 		wsClient.pong(payloadLength)
 		return nil
 
 	case OP_PONG:
 		debug.Println("got a pong")
+
+		if !fin {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSClientError{message: "Pong cannot be fragmented"}
+		}
+
+		if payloadLength > 125 {
+			responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+			wsClient.send(FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+			return &WSClientError{message: "Pong payload too long"}
+		}
+
+		readBuffer := make([]byte, payloadLength)
+		io.ReadFull(wsClient.connection, readBuffer)
+
 		return nil
 
 	case OP_CTRL_RSVD1, OP_CTRL_RSVD2, OP_CTRL_RSVD3, OP_CTRL_RSVD4, OP_CTRL_RSVD5:
@@ -330,7 +451,7 @@ func (wsClient *wsclient) readFromConnection(readBuffer []byte) error {
 		}()
 		closeMessage := fmt.Sprintf("Invalid opcode received: %d", opCode)
 		wsClient.handleClose(CLOSE_STATUS_PROTOCOL_ERR, closeMessage)
-		return &WSServerError{message: "Received reserved control opcode: Connection closed"}
+		return &WSClientError{message: "Received reserved control opcode: Connection closed"}
 	}
 
 	return nil
@@ -365,15 +486,6 @@ func (wsClient *wsclient) parseFrame(payloadLength byte) []byte {
 		data = wsClient.readFrameData(uint64(payloadLength64))
 	}
 
-	if wsClient.messageDeflated {
-		decompressed, err := wsClient.deflateConfig.Inflate(data)
-		if err != nil {
-			panic(err)
-		}
-
-		data = decompressed
-	}
-
 	return data
 }
 
@@ -403,13 +515,16 @@ func (wsClient *wsclient) SendBinary(data []byte) error {
 func (wsClient *wsclient) send(controlByte byte, data []byte) error {
 	opCode := controlByte & 0b00001111
 	if wsClient.deflateConfig != nil && len(data) > 0 && (opCode == OP_TEXT_FRAME || opCode == OP_BINARY_FRAME) {
-		compressedData, err := wsClient.deflateConfig.Deflate(data)
-		if err != nil {
-			return err
-		}
+		_, clientDeflateEnabled := wsClient.deflateConfig.Enabled()
+		if clientDeflateEnabled {
+			compressedData, err := wsClient.deflateConfig.Deflate(data)
+			if err != nil {
+				return err
+			}
 
-		data = compressedData
-		controlByte |= RSV1_MASK // set RSVD1 bit for permessage-deflate
+			data = compressedData
+			controlByte |= RSV1_MASK // set RSVD1 bit for permessage-deflate
+		}
 	}
 
 	mask := generateMaskKey()
@@ -435,10 +550,10 @@ func (wsClient *wsclient) send(controlByte byte, data []byte) error {
 
 	if payloadLength <= 125 {
 		frame = append(frame, 0b10000000|byte(len(maskedData)))
-	} else if payloadLength <= (1 << 16) {
+	} else if payloadLength < (1 << 16) {
 		frame = append(frame, 0xFE)
 		frame = binary.BigEndian.AppendUint16(frame, uint16(payloadLength))
-	} else if payloadLength > (1 << 16) {
+	} else if payloadLength >= (1 << 16) {
 		frame = append(frame, 0xFF)
 		frame = binary.BigEndian.AppendUint64(frame, uint64(payloadLength))
 	}
@@ -484,6 +599,7 @@ func (wsClient *wsclient) handleClose(closeStatus uint, closeMessage string) err
 	binary.BigEndian.PutUint16(payload, uint16(closeStatus))
 	copy(payload[2:], closeMessage)
 
+	wsClient.connection.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	wsClient.send(controlByte, payload)
 
 	if !closeSignalReceived {

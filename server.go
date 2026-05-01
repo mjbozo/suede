@@ -23,17 +23,7 @@ import (
 	"github.com/mjbozo/suede/deflate"
 )
 
-var allowedCloseCodes = map[uint16]bool{
-	uint16(CLOSE_STATUS_NORMAL):        true,
-	uint16(CLOSE_STATUS_GOING):         true,
-	uint16(CLOSE_STATUS_PROTOCOL_ERR):  true,
-	uint16(CLOSE_STATUS_DATATYPE_ERR):  true,
-	uint16(CLOSE_STATUS_TYPE_MISMATCH): true,
-	uint16(CLOSE_STATUS_VIOLATION):     true,
-	uint16(CLOSE_STATUS_TOO_BIG):       true,
-	uint16(CLOSE_STATUS_NEGOTIATE_ERR): true,
-	uint16(CLOSE_STATUS_UNEXPECTED):    true,
-}
+// TODO: Graceful close on all errors, surely can have a common function to handle it
 
 type WSServerError struct {
 	message string
@@ -378,6 +368,12 @@ func (wsServer *wsserver) readFromConnection(clientConnection *ClientConnection,
 
 		if payloadLength != 0 {
 			data := wsServer.parseFrame(clientConnection, payloadLength)
+
+			if len(data) < 2 {
+				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_PROTOCOL_ERR))
+				wsServer.send(clientConnection, FINAL_FRAGMENT|OP_CLOSE_CONN, responseCode)
+				return &WSServerError{message: "Ping cannot be fragmented"}
+			}
 
 			if !utf8.Valid(data[2:]) {
 				responseCode := binary.BigEndian.AppendUint16(nil, uint16(CLOSE_STATUS_TYPE_MISMATCH))

@@ -31,3 +31,15 @@ const (
 	RSV2_MASK                  byte = 0b00100000
 	RSV3_MASK                  byte = 0b00010000
 )
+
+var allowedCloseCodes = map[uint16]bool{
+	uint16(CLOSE_STATUS_NORMAL):        true,
+	uint16(CLOSE_STATUS_GOING):         true,
+	uint16(CLOSE_STATUS_PROTOCOL_ERR):  true,
+	uint16(CLOSE_STATUS_DATATYPE_ERR):  true,
+	uint16(CLOSE_STATUS_TYPE_MISMATCH): true,
+	uint16(CLOSE_STATUS_VIOLATION):     true,
+	uint16(CLOSE_STATUS_TOO_BIG):       true,
+	uint16(CLOSE_STATUS_NEGOTIATE_ERR): true,
+	uint16(CLOSE_STATUS_UNEXPECTED):    true,
+}
