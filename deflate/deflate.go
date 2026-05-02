@@ -105,6 +105,7 @@ func Parse(extensionHeader string) (*DeflateConfig, error) {
 	return nil, errors.New("No agreed extension, declining connection")
 }
 
+// TODO: Surely can handle this a bit nicer??
 func validateExtensionOption(option string) (*DeflateConfig, error) {
 	potentialConfig := &DeflateConfig{
 		clientNoContextTakeover: false,
@@ -117,6 +118,7 @@ func validateExtensionOption(option string) (*DeflateConfig, error) {
 	serverDeflateEnabled := true
 
 	headerParts := strings.SplitSeq(option, ";")
+
 	for part := range headerParts {
 		if after, ok := strings.CutPrefix(part, "client_max_window_bits="); ok {
 			bits, err := strconv.Atoi(after)

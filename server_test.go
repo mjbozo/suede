@@ -1034,7 +1034,7 @@ func TestInvalidOpCodesReturnError(t *testing.T) {
 		err := server.readFromConnection(client, make([]byte, 2))
 
 		if err == nil {
-			t.Error("Expected client to return error when invalid op code recieved")
+			t.Error("Expected client to return error when invalid op code received")
 		}
 	}
 }

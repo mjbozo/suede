@@ -422,7 +422,7 @@ func TestOnMessageCallbackForUnfragmentedFrame(t *testing.T) {
 		client.readFromConnection(readBuffer)
 
 		if !slices.Equal(received, testCase.data) {
-			t.Errorf("Expected data recieved in onMessage: expected %v, got %v", testCase.data, received)
+			t.Errorf("Expected data received in onMessage: expected %v, got %v", testCase.data, received)
 		}
 	}
 }
@@ -455,7 +455,7 @@ func TestOnMessageCallbackForFragmentedFrames(t *testing.T) {
 
 	expected := append(part1, part2...)
 	if !slices.Equal(received, expected) {
-		t.Errorf("Expected data recieved in onMessage: expected %v, got %v", expected, received)
+		t.Errorf("Expected data received in onMessage: expected %v, got %v", expected, received)
 	}
 }
 
@@ -812,7 +812,7 @@ func TestClientReturnsErrorForInvalidOpCodes(t *testing.T) {
 		err := client.readFromConnection(make([]byte, 2))
 
 		if err == nil {
-			t.Error("Expected client to return error when invalid op code recieved")
+			t.Error("Expected client to return error when invalid op code received")
 		}
 	}
 }
