@@ -512,10 +512,10 @@ func TestCloseFrameEchoesStatusCode(t *testing.T) {
 	testCases := []sendFrameTestCase{
 		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: []byte{0x3, 0xE8}},
 		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: append([]byte{0x3, 0xE8}, []byte("close reason")...)},
-		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: []byte{0x3, 0xEC}},
-		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: append([]byte{0x3, 0xEC}, []byte("close reason")...)},
-		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: []byte{0x3, 0xED}},
-		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: append([]byte{0x3, 0xED}, []byte("close reason")...)},
+		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: []byte{0x3, 0xEA}},
+		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: append([]byte{0x3, 0xEB}, []byte("close reason")...)},
+		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: []byte{0x3, 0xEF}},
+		{controlByte: FINAL_FRAGMENT | OP_CLOSE_CONN, data: append([]byte{0x3, 0xF3}, []byte("close reason")...)},
 	}
 
 	for _, testCase := range testCases {
